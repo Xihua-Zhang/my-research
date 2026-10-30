@@ -1,0 +1,565 @@
+                                        LLM Inference Serving: Survey of Recent
+                                                Advances and Opportunities
+
+                                                           Baolin Li∗, Yankai Jiang∗, Vijay Gadepally†, Devesh Tiwari∗
+                                                                             ∗ Northeastern University, † MIT
+
+arXiv:2407.12391v1 [cs.DC] 17 Jul 2024     Abstract—This survey offers a comprehensive overview of          enhancements that maintain the integrity of standard LLM
+                                        recent advancements in Large Language Model (LLM) serving           decoding processes.
+                                        systems, focusing on research since the year 2023. We specifically
+                                        examine system-level enhancements that improve performance             While a few prior LLM inference system surveys exist [4],
+                                        and efficiency without altering the core LLM decoding mech-         [5], [6], these generally cover a broader scope and do not
+                                        anisms. By selecting and reviewing high-quality papers from         specifically emphasize system research. Additionally, many of
+                                        prestigious ML and system venues, we highlight key innovations      the papers discussed in those surveys involve decoding algo-
+                                        and practical considerations for deploying and scaling LLMs         rithm modifications that can affect model accuracy. Our survey,
+                                        in real-world production environments. This survey serves as a      in contrast, explicitly focuses on system-level solutions that do
+                                        valuable resource for LLM practitioners seeking to stay abreast     not alter the core LLM decoding mechanisms. Moreover, our
+                                        of the latest developments in this rapidly evolving field.          survey encompasses a significant body of research published
+                                                                                                            after the release of these earlier surveys, thus providing a more
+                                                                  I. INTRODUCTION                           comprehensive and up-to-date overview of the field.
+
+                                           Large language models (LLMs) have rapidly gained im-                We have organized the recent advances in LLM serving
+                                        mense popularity since the release of ChatGPT. However,             systems into four distinct categories, each with its own set of
+                                        deploying and scaling these powerful AI models in production        challenges and opportunities, which we will delve into in the
+                                        environments has presented significant challenges. The sub-         following sections.
+                                        stantial computational and memory demands of LLMs often
+                                        necessitate the use of high-performance GPU servers, yet even       KV cache and memory management. Efficient memory
+                                        these resources can be strained by the sheer size of the models     management is crucial to handle the dynamic growth of
+                                        and the lengthy text sequences they process.                        KV caches, which store previous key-value pairs to acceler-
+                                                                                                            ate LLM inference. Recent research explores non-contiguous
+                                           The growing demand for LLM-powered applications has              memory allocation, distributed management, and intelligent
+                                        fueled a surge of research into LLM serving systems. In this        caching strategies to optimize memory utilization. Compres-
+                                        paper, we present a comprehensive survey of these systems,          sion techniques are also being investigated to reduce the over-
+                                        focusing on advancements since 2023. While previous LLM             all memory footprint, ultimately enhancing LLM performance
+                                        system research existed, the landscape has dramatically shifted     and scalability by allowing for longer context lengths and
+                                        within the last year. Nearly every major system conference          lower memory overhead.
+                                        now features dedicated sessions on LLMs, with a particular
+                                        emphasis on serving systems due to their widespread deploy-         LLM computation optimization. Efforts to optimize LLM
+                                        ment and the importance of low-latency performance for user         computation focus on request batching to maximize resource
+                                        experience.                                                         utilization. Additionally, disaggregating the inference process
+                                                                                                            into prefill and decode phases enables independent optimiza-
+                                           The sheer volume of research published in such a short time-     tion and hardware specialization. Model parallelism, employ-
+                                        frame makes it difficult for LLM practitioners to stay abreast      ing various techniques, facilitates efficient execution across
+                                        of developments and identify the most promising approaches          multiple GPUs. These strategies collectively enhance LLM
+                                        for real-world deployment. This survey aims to provide a            execution efficiency and hardware utilization.
+                                        clear overview of the current state of the art, highlighting key
+                                        areas of innovation and practical considerations for production     Cloud LLM deployment. Cloud platforms provide a scalable
+                                        environments.                                                       and cost-effective foundation for LLM inference. However,
+                                                                                                            challenges remain in optimizing costs and resource utiliza-
+                                           In this survey, we have meticulously selected all the high-      tion. Research is addressing this through techniques such as
+                                        quality research papers focused exclusively on LLM serving          spot instance management, serverless optimizations, intelligent
+                                        systems, published between January 2023 and June 2024.              resource allocation, and power management. Additionally,
+                                        Our selection criteria prioritized publications from prestigious    strategies like cloud task co-location and token delivery opti-
+                                        machine learning (ML) and system venues (e.g., ASPLOS,              mization enhance user experience and overall cloud efficiency.
+                                        MLSys, OSDI), as well as impactful arXiv submissions from
+                                        established industry and academic research groups. Notably,         Emerging research fields. Emerging areas in LLM serving
+                                        we exclude studies that modify LLM decoding algorithms              include retrieval-augmented generation (RAG) and mixture-
+                                        (e.g., multiple decoding head [1], lookahead decoding [2],          of-experts (MoE) inference. RAG faces challenges related to
+                                        key token selection [3]) and solely focus on system-level
+                                                              Block N      Preﬁll Phase                                  Decoding Phase
+                                                       Block 2
+       Concatenation, Projection W 0              Block 1                                       KV-Cache
+
+   Self-attention Calculation
+
+                                      Norm Layer                           Iteration 1   a  Iteration 2     Iteration 3  Iteration 4
+
+Q   K                          V
+
+WQ     WK                      WV     FFN
+
+                                                                            “Computer           discipline  .            <EOS>
+                                                                           science is”
+
+    Encoded Input Prompt X                        Output
+
+                                                                       Fig. 2: Prefill and decoding phase in the LLM inference.
+
+Fig. 1: Transformer-based LLM architecture including both the          decoding phase handles the generation of subsequent tokens.
+multi-head attention mechanism and feed-forward network.               We visualize this process in Fig. 2.
+
+the computational overhead of increased input lengths due to              The prefill phase starts with a tokenized and encoded
+retrieved documents, while MoE inference grapples with effi-           representation of the prompt going through layers of the
+cient communication and load balancing between distributed             transformers. Note that the generated key-value (KV ) pairs
+experts. Other research efforts address ethical concerns in            of all transformer blocks are cached during the prefill phase,
+LLM serving, such as fairness and environmental sustainabil-           referred to as KV cache [9]. It ensures that the model can
+ity, for which we provide a comprehensive list of relevant             generate tokens more efficiently without recomputing the
+studies.                                                               KV vectors of all previous tokens. Let the input prompt
+                                                                       P = [p1, p2, ..., pn], during the prefill phase, a new token is
+                          II. BACKGROUND                               generated, denoted as Pn+1, and the new K and V are cached
+                                                                       as [(k1, v1), (k2, v2), ..., (kn, vn)].
+A. Overview of Transformer-based LLM Architecture
+                                                                          The decoding phase is where the model generates new
+   Mainstream LLMs are built on multiple transformer                   tokens autoregressively. The LLM predicts the next token,
+blocks [7]. Each identical transformer primarily consists of           appends the newly generated token pn+1 to the original prompt
+self-attention-based Multi-head Attention (MHA) operations             P , and updates the KV cache. Note that the KV cache grows
+and Feed-Forward Networks (FFN). Initially, the transformer            linearly with the number of tokens generated. The autoregres-
+applies three weight matrices (W Q, W K , W V ) to the input           sive LLM inference process is outlined in Algorithm 1.
+X (encoded representation of input text sequence) to compute
+queries Q, keys K, and values V . Then, the Self-attention is          Algorithm 1 Autoregressive LLM Inference
+calculated as:
+                                                                           Input P : encoded input sequence [p1, p2, ..., pn]
+                   Q = XWQ; K = XWK; V = XWV
+                                                        QK T               Output X: generated new sequence [].
+
+                Attention(Q, K, V ) = softmax( √ )V                    1: Forward Pass ([p1, p2, ..., pn])
+                                                           dk
+                                                                       2: Store the KV cache: [(k1, v1), (k2, v2), ..., (kn, vn)]
+   This is the calculation of one attention head (Hi), and
+multiple heads are concatenated and linearly projected into            3: for i from 1 to M do
+the final attention result:
+                                                                       4: Predict the next token pn+i using the KV cache.
+                         Hi = Attention(XWiQ, XWiK , XWiQ)
+         Multi-Head Attention = Concat(H1, H2, ..., Hh)W O             5: Store (kn+i, vn+i) to the KV cache.
+
+   MHA makes transformers focus on different parts of the              6: X ← X ∪ {pn+i}
+sequence in different representational spaces. Next, following
+the MHA block, the normalized output is fed into a position-           7: if pn+i is EOS token or len(X)>max length then
+wise FFN, which consists of two linear transformations with
+a ReLU activation.                                                     8:  break
+
+                  FFN(x) = max(0, xW1 + b1)W2 + b2                              III. MEMORY MANAGEMENT AND CACHING
+
+   The FFN can be applied separately to each position, further            In this section, we explore memory management techniques
+refining the information captured by the MHA block. The                to mitigate memory footprint and access overhead during
+output will have the same dimension as the input X. Fig. 1             LLM inference. While model parameters remain constant and
+provides a visualization of the LLM architecture.                      intermediate activations are relatively small, the KV cache –
+                                                                       used to store attention information – grows substantially with
+                                                                       the number of generated tokens. Therefore, recent research has
+                                                                       focused on efficient KV cache management to enable larger
+                                                                       batch sizes and longer context processing.
+
+B. Overview of LLM Inference                                           A. Efficient Management of KV Cache
+
+   LLM inference generates output tokens autoregressively [8]             PagedAttention [10] identifies that the KV cache dynam-
+based on the initial input sequences P , referred to as Prompts.       ically grows and shrinks over time as the model generates
+This process is divided into two major phases: the prefill             new tokens, but the request generation lifetime and length
+phase and the decoding phase. The prefill phase is essential           are not known a priori. Thus, it proposes to manage the
+for setting up the model to generate text efficiently, while the       KV cache as non-contiguous memory blocks. Compared to
+contiguous KV cache, non-contiguous KV cache management           by rehearsing the attention computation of the current layer in
+significantly reduces the memory waste on pre-allocation and      the preceding layer and prefetches only the essential entries
+fragmentation. Due to its efficient memory management using       to the GPU, thereby reducing the data transfer overhead.
+pages, PagedAttention has become an industry norm in LLM          LoongServe [20] introduces a new parallelism paradigm called
+serving frameworks, supported by TGI [11], vLLM [10] and          Elastic Sequence Parallelism (ESP) to dynamically adapt to
+TensorRT-LLM [12].                                                resource usage variance between requests and phases (pre-
+                                                                  filling and decoding) of a request. It reduces KV cache
+   Despite its success, researchers still identify its weakness   migration overhead and KV cache fragmentation when serving
+as PagedAttention requires rewriting attention kernels to ac-     long sequences.
+commodate the non-contiguous memory blocks, its memory
+manager adds software complexity and redundancy, and intro-       C. Compression of KV Cache
+duces performance overhead. Recently, vAttention [13] was
+proposed to retain the KV cache in contiguous virtual memory.        Due to the large memory footprint of LLM serving, some
+It leverages pre-existing low-level system calls for demand       systems have resorted to compressing the KV cache. On
+paging, which is a standard operating system feature to re-       top of memory aggregation and communication scheduling,
+duce the software complexity. vAttention overlaps memory          FlexGen [21] uses fine-grained groupwise quantization to
+allocation with computation, pre-allocates memory ahead of        compress the weights and KV cache to 4 bits. KIVI [22]
+time, and defers memory reclamation to hide the latency of        analyzes the element distribution of the LLM KV cache
+memory allocation and improve the overall performance of the      and applies asymmetric quantization of the Key and Value
+system.                                                           cache. KIVI quantizes the key cache per-channel (grouping
+                                                                  elements along the channel dimension) and the value cache
+   Besides system memory management, other efforts have           per-token to achieve minimum quantization error. Gear [23]
+addressed application-specific KV cache efficiency. Prompt        achieves near-lossless high-ratio KV cache compression by
+Cache [14] designs specific prompt schema for users to submit     quantizing the majority of entries of similar magnitudes and
+their requests, so that attention states from these pre-defined   employs a low-rank matrix to approximate the quantization
+modules (e.g., system prompt) can be reused across multiple       error. MiniCache [24] observes that the KV cache states
+prompts. AttentionStore [15] identifies that human interactions   exhibit high similarity between adjacent layers in the middle-
+with applications such as ChatGPT are mostly multi-turn           to-deep portion of LLMs. Based on this insight, MiniCache
+conversations. However, LLM engines would discard the KV          leverages this high similarity to merge them into a shared
+cache when the user session becomes inactive to free up HBM       representation to reduce redundancy, while also identifying
+space for other active sessions and re-compute the whole KV       and retaining distinct states that are crucial for maintaining
+cache again when the session becomes active, leading to extra     the model’s performance, preventing information loss during
+pre-filling costs. AttentionStore utilizes slower-mediums (e.g.,  compression.
+CPU memory and disk), overlaps KV cache loading with
+computation, and designs intelligent pre-fetching and eviction                IV. COMPUTATION TASK SCHEDULING
+policies.
+                                                                     Besides memory and KV cache management, the compu-
+B. Support for Long-Context Applications                          tation of LLM also presents significant system challenges.
+                                                                  Due to the sequential dependency between tokens during the
+   Serving long-context LLM applications is particularly chal-    autoregressive generation, LLM can only generate one token
+lenging as the size of the KV cache scales with the number        at a time for each request. Thus, LLM inference workloads
+of tokens. The limited memory limits LLM’s ability to handle      are less resource-efficient than training workloads on GPU
+long sequences, demanding more memory-efficient solutions.        hardware that is designed for massively parallel execution.
+Ring attention [16] is a novel distributed approach that lever-   Following this incentive, we investigate system solutions that
+ages blockwise computation of attention and feedforward of        optimize the scheduling of computation tasks during the
+long sequences across multiple devices. It efficiently overlaps   inference process.
+KV cache communication with computation and extends the
+context length by the device count times. Infinite-LLM [17]       A. Request Batching
+is another distributed solution, it breaks down KV cache into
+smaller manageable units called rBlocks across GPUs/CPUs,            When a single request cannot efficiently utilize the GPU,
+and efficiently manages them with dynamic memory sharing          it is intuitive to batch multiple inference requests together to
+and coordination. MemServe [18] unifies handling of inter-        boost the occupancy of GPU cores. However, as responses to
+request and intra-request optimizations for LLM serving by        different prompts can have significantly variable lengths, when
+introducing MemPool, a distributed memory pool to manage          batched together, the shorter responses are forced to wait for
+KV cache across all cluster memory and employs a global           the longer ones to complete, resulting in computational waste.
+scheduler to maximize KV cache reuse.                             Response Length Perception and Sequence Scheduling [25]
+                                                                  instructs the LLM to predict the response length before starting
+   When the context grows larger than the GPU memory limit,       to generate the actual response, and batches queries with
+most systems offload the KV cache to the CPU. InfiniGen [19]      similar predicted response lengths to reduce computational
+is a solution that speculates the important KV cache entries
+waste. A similar approach, S3 [26], finetunes a Distillbert       C. Model Parallelism
+model for sequence length prediction. Upon mispredictions,
+it preempts sequences that exceed their allocated memory and         LLMs can have hundreds of billions of parameters, re-
+retrain the predictor to learn from its mistakes.                 quiring model parallel execution on multiple GPUs. Pope et
+                                                                  al. [9] develop an analytical model for inference efficiency,
+   Generation length prediction based batching is less practical  enabling the selection of optimal multi-dimensional partition-
+due to the strong reliance on the predictor. Orca [27] proposes   ing techniques tailored for TPU v4 slices based on specific
+continuous batching at the token level rather than the request    application needs. HeteGen [33] introduces a framework for
+level. It continuously schedules new requests into the batch as   heterogeneous parallel computing using CPUs and GPUs.
+soon as a request in the current batch completes. Continuous      It employs a heterogeneous parallel computing algorithm
+batching now has become an industry standard in LLM serving       to distribute computation within its hybrid heterogeneous
+frameworks, incorporated into the software of TGI, vLLM, and      parallelism framework and enables asynchronous overlap to
+TensorRT-LLM. Based on continuous batching, DeepSpeed-            mitigate I/O bottlenecks between the CPU and GPU.
+FastGen [28] proposes a dynamic SplitFuse mechanism that
+decomposes long prompts into smaller chunks scheduled                ExeGPT [34] can find an optimal schedule control variable
+across multiple iterations and composes short prompts together    of the batch size and tensor parallelism degree that maximizes
+to maintain the inference running at high throughput region       inference throughput while adhering to a given latency limit.
+(bounded by GPU compute not memory bandwidth). A similar          It leverages the distribution of input and output sequence
+idea was explored in Sarathi-Serve [29], which splits prefill     lengths to allocate resources efficiently and determine the best
+requests into smaller chunks and schedules them alongside         parallelism configuration. Helix [35] is designed to partition
+ongoing decode requests without causing stalls (stall-free        an LLM across heterogeneous GPUs and different types of
+batching). This allows new requests to join a running batch       network connections. It formulates its model partition scenario
+without pausing ongoing decodes, leading to minimal pipeline      as a max-flow problem of a directed, weighted graph whose
+bubbles.                                                          nodes represent GPU instances and edges capture both GPU
+                                                                  and network heterogeneity through their capacities in the max-
+B. Disaggregated Inference                                        flow problem.
+
+   LLM inference goes through a prefill stage to process the                            V. LLMS IN THE CLOUD
+prompt, populate the KV cache, and start the decoding stage
+to generate tokens (Sec. II). Existing LLM serving systems           LLM deployments are computationally intensive and often
+colocate the two phases and batch the computation of prefill      require significant infrastructure to run effectively. Cloud
+and decoding across all users and requests. However, these        platforms offer a scalable and cost-effective solution for de-
+two phases display distinct characteristics and can interfere     ploying LLMs, eliminating the need for expensive hardware
+with each other when requests at the prefill stage are batched    investments. The flexibility of cloud deployment allows or-
+with requests at the decoding stage. TetriInfer [30] separates    ganizations to easily adjust resources as needed, ensuring
+prefill and decode instances, allowing each phase to run          optimal performance and minimizing downtime. However, the
+independently and preventing interference between batch-like      significant costs associated with cloud computing resources
+prefill jobs and latency-critical decode tasks. It employs a      and the challenge of ensuring their efficient utilization can be
+two-level scheduling algorithm that incorporates predicted        major obstacles for LLM service providers.
+resource usage to avoid scheduling hotspots during the decode
+phase, ensuring efficient resource allocation and minimizing      A. Cloud Deployment Cost
+contention.
+                                                                     Modern clouds offer a variety of spot instances (e.g., AWS
+   Splitwise [31] extensively characterizes the differences in    EC2 Spot Instance, Azure Spot Virtual Machines, Google
+the execution and utilization patterns of the prefill and de-     Cloud Spot VMs). These instances run on spare capacity and
+coding stage on different generations of GPUs (heterogeneous      are offered at highly discounted prices, but may be preempted
+hardware). Splitwise proposes to split these two phases into      at any time when other instances need the capacity. Spot-
+separate machines, allowing for specialized hardware for each     Serve [36] addresses the challenges of using these instances
+phase to achieve better utilization, reduce hardware ownership    for LLM serving, such as how to quickly adapt to changes in
+costs, and save energy. DistServe [32] designs a placement        available instances and how to minimize the cost of migrating
+algorithm to schedule the prefill and decoding stage compu-       instances when interruptions occur. It also introduces a stateful
+tation tasks. In clusters with high-speed cross-node networks,    inference recovery mechanism for inference engines to com-
+DistServe optimizes parallelism configurations for prefill and    mit their progress at the token level and efficiently resume
+decoding instances independently to achieve the best per-GPU      interrupted requests.
+goodput; In clusters with limited cross-node bandwidth, it
+ensures that prefill and decoding instances of the same stage        Serverless is a recently emerged cloud computing paradigm,
+are co-located within a single node and optimizes parallelism     where inference service users can submit their model to the
+configurations within the node.                                   cloud and the cloud provider takes care of all infrastructure
+                                                                  provision and scaling with varying inference request load,
+                                                                  and saves unused hardware costs for customers. A major
+                                                                  challenge in serverless is mitigating cold start, where a service
+instance would be shut down after not being accessed for some    for each token generation. In contrast, PEFT, which processes
+time, and once a new request arrives, it would experience        all tokens of a request simultaneously, is mainly constrained
+a latency spike associated with re-initializing the service      by compute resources, such as the tensor cores on GPUs.
+instance. ServerlessLLM [37] addresses these latency issues      FlexLLM introduces a token-level fine-tuning mechanism that
+by utilizing the underutilized storage and memory resources      breaks down the fine-tuning process into smaller, more man-
+available on GPU servers. It introduces a new checkpoint         ageable token-level computations to minimize memory usage
+format and loading system to speed up LLM model loading,         and inference latency, making co-serving feasible.
+a live migration mechanism to avoid interrupting ongoing
+inferences, and a locality-aware server allocation strategy to      As LLM inference follows token-by-token generation, users
+minimize LLM inference cold start latency.                       also read the response word-by-word. Andes [43] defines a
+                                                                 user experience metric of Quality of Experience (QoE) for text
+   Cloud providers often offer a wide range of heterogeneous     streaming services. It is formulated by comparing the actual
+instance selections labeled at different prices. Me´lange [38]   token delivery timeline (TDT) of a request with its expected
+is a cloud resource allocation framework that considers three    TDT. The expected TDT is determined by the expected time
+key LLM service characteristics: request size, request rate,     to first token (TTFT) and the expected token delivery speed
+and service-level objective. It automatically navigates through  (TDS), which can vary depending on factors like the user’s
+the GPU option space to determine the most cost-efficient        typical reading speed. The intuition is generating text too fast
+heterogeneous GPU allocation for a given LLM service. With       (than user reading speed) does not yield QoE benefits, wasting
+the resources allocated and model hosted on the GPUs, Llum-      cloud resources. Andes addresses this by strategically allocat-
+nix [39] is a dynamic scheduling system for LLM serving that     ing GPU resources among multiple requests to optimize QoE.
+addresses the challenges of heterogeneous and unpredictable      It employs a dynamic priority-based preemptive scheduler that
+requests by rescheduling them across multiple model instances    operates at the token level, prioritizing urgent requests and
+at runtime – similar to how OS context switches across cores.    preempting those that have been sufficiently served. Andes
+Llumnix introduces an efficient live migration mechanism for     improves average QoE and can handle higher request rates
+requests and their in-memory states, minimizing downtime         while maintaining similar token generation throughput.
+during rescheduling, and employs a dynamic scheduling pol-
+icy that unifies various rescheduling scenarios, such as load                   VI. EMERGING RESEARCH FIELDS
+balancing, de-fragmentation, prioritization, and auto-scaling.
+This efficiency has resulted in significant cost savings while   A. Retrieval Augmented Generation
+achieving similar tail latency.
+
+B. Cloud Efficiency                                                 Retrieval-Augmented Generation (RAG) [44] is a technique
+                                                                 that enhances LLMs by incorporating external information
+   A key bottleneck resource in cloud datacenters is power,      sources. It addresses the limitations of LLMs in retaining
+which LLMs are quickly saturating due to their growing           factual knowledge and their tendency to generate inaccurate
+computation demand. POLCA [40] characterizes the power           or fabricated information (hallucinations). RAG operates in
+consumption patterns of LLMs in the cloud and finds that         two stages: retrieval and generation. During retrieval, the
+while training LLMs demands a lot of power and can strain the    system identifies the most relevant contexts from an external
+data center’s power infrastructure, inference tasks offer more   knowledge base or corpus based on the given query. Once
+flexibility for power management due to their less predictable   the relevant contexts are retrieved, they are integrated into the
+power demands. POLCA devises a framework to manage               LLM’s generation process in different processes including con-
+power in LLM inference clusters by dynamically applying          catenation (where the retrieved contexts are simply appended
+techniques such as GPU frequency locking and power capping.      to the query) and cross-attention (where the LLM attends to
+PerLLM [41] takes the LLM inference to an edge-cloud             the retrieved contexts during generation).
+collaboration scenario, where it leverages the strengths of
+edge computing (low latency, reduced energy costs) and cloud        Sparse RAG [45] observes that RAG can be computationally
+computing (high processing power) to handle LLM inference        expensive due to the increased input length from retrieved
+tasks efficiently. PerLLM employs a Constraint Satisfaction      documents. It first encodes retrieved documents in parallel
+Upper Confidence Bound (CS-UCB) algorithm to optimize            to eliminate latency caused by long-range attention, then
+service scheduling and resource allocation while adhering to     selectively decodes the output by attending only to highly
+constraints like processing time, bandwidth, and computing       relevant caches chosen via prompting the LLM with special
+power – achieving energy LLM efficiency.                         control tokens. RAGCache [46] caches intermediate states of
+                                                                 external knowledge with a knowledge tree to organize and
+   Workloads often get co-located in the cloud environment.      store intermediate states. The cached knowledge can be shared
+FlexLLM [42] is a system designed to efficiently service         across multiple queries to reduce the redundant computation.
+LLM inference and parameter-efficient fine-tuning (PEFT)         Another knowledge caching technique is CacheBlend [47],
+requests in the same iteration. LLM inference, which involves    which selectively recomputes a small portion of the KV cache
+generating text token by token, is primarily limited by memory   based on the preceding text in the input.
+bandwidth due to the need to access all model parameters
+B. Mixture-of-Experts Inference                                    consumption. (ii) Expert buffering leverages the observation
+                                                                   that expert activation is often sparse and exhibits temporal
+   The mixture of Experts (MoE) is used in LLMs to im-             locality. By caching frequently used (hot) experts in GPU
+prove efficiency and performance. It divides the model into        memory and buffering less active experts in CPU memory,
+specialized sub-networks, called “experts”, each focusing on       expert buffering reduces the static memory allocation on GPU.
+a specific task. A “gating” network then directs input to the      (iii) Imbalanced token assignments to experts can lead to bot-
+most suitable expert. In the inference process of an MoE trans-    tlenecks and performance degradation. Expert load balancing
+former, the input is first passed through a gating network. This   ensures a more even distribution of workload across devices.
+network determines which expert, or a combination of experts,
+is best suited to process the specific input. MoE’s sparsely       C. Miscellaneous Fields
+activated subset of experts avoids the large computational need
+to process the entire model for every inference.                   Ethics and environmental sustainability. Sheng et. al [54]
+                                                                   ensure fairness in serving LLMs by introducing a Virtual
+MoE Communication. Lina [48] is a system designed to               Token Counter (VTC). VTC defines LLM serving fairness
+address the all-to-all communication bottleneck in distributed     based on a cost function that accounts for the number of
+MoE. The all-to-all communication occurs when distributed          input and output tokens processed. It achieves fairness by
+MoE sends tokens to their selected experts for processing and      tracking the services received by each client and prioritizing
+then sends the results back to the original devices. During        those with the least service, while also considering the varying
+inference, Lina dynamically schedules resources based on           costs of processing input and output tokens. Sprout [55] ad-
+expert popularity, balancing the transfer size and bandwidth       dresses the environmental sustainability of LLMs and designs
+of all-to-all communication across devices. ExFlow [49] is         a framework to reduce the carbon footprint of LLM inference
+an optimization technique to accelerate the inference of dis-      services. Sprout introduces “generation directives” to guide
+tributed MoE. It leverages the inter-layer expert affinity, which  the autoregressive generation process, balancing the need for
+is the correlation between expert selection across different       sustainability with the demand for high-quality generation.
+MoE layers. By placing experts on corresponding GPUs based
+on their affinity, ExFlow reduces cross-GPU routing latency        Inference pipeline optimization. FlashDecoding++ [56] con-
+and improves inference throughput.                                 ducts inference engine performance optimization, addressing
+                                                                   several issues in softmax synchronization, GPU kernel, and
+Expert offloading. SiDA-MoE [50] (Sparsity-inspired Data-          dataflow. For example, the decoding phase performs linear
+Aware) leverages both main memory and GPU memory by                GEMM operations with flat shapes where the batch size
+exploiting the inherent sparsity of expert activation in MoE       dimension involved in the multiplication is much smaller
+models. SiDA-MoE includes two parallel threads: an inference       than the others. FlashDecoding++ accelerates flat GEMM
+thread and a hash-building thread. The hash-building thread        with double buffering that overlaps computation and data
+predicts which experts will be activated for each token at         transfer and hides the memory latency in loading input ma-
+each layer, storing these predictions in a hash table. The         trices. Parrot [57] is designed to optimize the performance
+inference thread then uses this information to dynamically         of LLM-based applications that involve multiple LLM re-
+load activated experts onto the GPU and offload inactive           quests with complex workflows. Parrot performs data flow
+experts to main memory, maximizing GPU memory utilization.         analysis and uncovers correlations across multiple LLM re-
+MoE-Infinity [51] takes a different approach toward expert         quests, and introduces a series of optimizations to improve
+offloading. The system leverages the observation that MoE          performance. FlashAttention-3 [58] is a method to speed up
+models exhibit sparse activation and temporal locality during      attention for large language models and long-context appli-
+inference, meaning only a few experts are repeatedly activated     cations. It introduces techniques like warp specialization and
+for processing a specific sequence. MoE-Infinity traces expert     asynchronous block-wise operations to optimize GPU utiliza-
+activation at the sequence level, enabling it to predict which     tion. FlashAttention-3 achieves significant speedup on Hopper
+experts will be needed and prefetch them accordingly.              GPUs compared to its predecessor and reduces numerical
+                                                                   errors in FP8 computations.
+MoE Efficiency. Fiddler [52] is a system designed to
+efficiently run these models on a limited number of GPUs,          Frugal inference. FrugalGPT [59] proposes several solutions
+even when the model’s size would typically exceed the GPU’s        to reduce the inference cost, such as prompt caching and
+memory capacity. Fiddler strategically distributes the model’s     LLM cascading which uses a sequence of LLMs, starting
+components. Non-expert layers, which are used frequently, are      with cheaper ones and moving to more expensive ones only if
+kept on the GPU. A subset of expert layers, chosen based           necessary. SpecInfer [60] applies speculative decoding using
+on how often they’re used, are also placed on the GPU.             smaller, speculative models to predict the LLM’s output,
+The rest remain in the CPU’s memory. Huang et al. [53]             reducing the computational resources. These predictions are
+introduce three optimization techniques to address the MoE         organized into a tree structure, and their accuracy is verified in
+inference inefficiencies. (i) Dynamic gating allows the number     parallel against the LLM. RouteLLM [61] dynamically selects
+of tokens processed by each expert to vary, which avoids the       between a stronger and a weaker LLM during inference to
+over-provisioning of resources in static gating and reduces        optimize the balance between cost and response quality.
+computational waste, communication overhead, and memory
+                         VII. CONCLUSION                                          [14] I. Gim, G. Chen, S.-s. Lee, N. Sarda, A. Khandelwal, and L. Zhong,
+                                                                                        “Prompt cache: Modular attention reuse for low-latency inference,”
+   This survey has presented a comprehensive overview of                                Proceedings of Machine Learning and Systems, vol. 6, pp. 325–338,
+recent advancements in LLM serving systems, emphasizing                                 2024.
+the importance of system-level solutions for enhancing per-
+formance and efficiency. We have highlighted key innovations                      [15] B. Gao, Z. He, P. Sharma, Q. Kang, D. Jevdjic, J. Deng, X. Yang,
+for deploying and scaling LLMs, paving the way for the future                           Z. Yu, and P. Zuo, “Cost-Efficient large language model serving
+development of LLM serving systems.                                                     for multi-turn conversations with CachedAttention,” in 2024 USENIX
+                                                                                        Annual Technical Conference (USENIX ATC 24). Santa Clara, CA:
+                        ACKNOWLEDGMENTS                                                 USENIX Association, Jul. 2024, pp. 111–126. [Online]. Available:
+                                                                                        https://www.usenix.org/conference/atc24/presentation/gao-bin-cost
+   This material is based upon work supported by the Assistant
+Secretary of Defense for Research and Engineering under Air                       [16] H. Liu, M. Zaharia, and P. Abbeel, “Ring attention with blockwise
+Force Contract No. FA8702-15-D-0001, and United States Air                              transformers for near-infinite context,” arXiv preprint arXiv:2310.01889,
+Force Research Laboratory Cooperative Agreement Number                                  2023.
+FA8750-19-2-1000. Any opinions, findings, conclusions, or
+recommendations expressed in this material are those of the                       [17] B. Lin, T. Peng, C. Zhang, M. Sun, L. Li, H. Zhao, W. Xiao,
+author(s) and do not necessarily reflect the views of the                               Q. Xu, X. Qiu, S. Li et al., “Infinite-llm: Efficient llm service for
+Assistant Secretary of Defense for Research and Engineering,                            long context with distattention and distributed kvcache,” arXiv preprint
+or the United States Air Force. The U.S. Government is                                  arXiv:2401.02669, 2024.
+authorized to reproduce and distribute reprints for Government
+purposes notwithstanding any copyright notation herein.                           [18] C. Hu, H. Huang, J. Hu, J. Xu, X. Chen, T. Xie, C. Wang, S. Wang,
+                                                                                        Y. Bao, N. Sun et al., “Memserve: Context caching for disaggregated
+                             REFERENCES                                                 llm serving with elastic memory pool,” arXiv preprint arXiv:2406.17565,
+                                                                                        2024.
+ [1] T. Cai, Y. Li, Z. Geng, H. Peng, J. D. Lee, D. Chen, and T. Dao,
+      “Medusa: Simple llm inference acceleration framework with multiple          [19] W. Lee, J. Lee, J. Seo, and J. Sim, “Infinigen: Efficient generative in-
+      decoding heads,” arXiv preprint arXiv:2401.10774, 2024.                           ference of large language models with dynamic kv cache management,”
+                                                                                        arXiv preprint arXiv:2406.19707, 2024.
+ [2] Y. Fu, P. Bailis, I. Stoica, and H. Zhang, “Break the sequential de-
+      pendency of llm inference using lookahead decoding,” arXiv preprint         [20] B. Wu, S. Liu, Y. Zhong, P. Sun, X. Liu, and X. Jin, “Loongserve:
+      arXiv:2402.02057, 2024.                                                           Efficiently serving long-context large language models with elastic
+                                                                                        sequence parallelism,” arXiv preprint arXiv:2404.09526, 2024.
+ [3] M. Adnan, A. Arunkumar, G. Jain, P. Nair, I. Soloveychik, and P. Ka-
+      math, “Keyformer: Kv cache reduction through key tokens selection for       [21] Y. Sheng, L. Zheng, B. Yuan, Z. Li, M. Ryabinin, B. Chen, P. Liang,
+      efficient generative inference,” Proceedings of Machine Learning and              C. Re´, I. Stoica, and C. Zhang, “Flexgen: High-throughput generative
+      Systems, vol. 6, pp. 114–127, 2024.                                               inference of large language models with a single gpu,” in International
+                                                                                        Conference on Machine Learning. PMLR, 2023, pp. 31 094–31 116.
+ [4] X. Miao, G. Oliaro, Z. Zhang, X. Cheng, H. Jin, T. Chen, and Z. Jia,
+      “Towards efficient generative large language model serving: A survey        [22] Z. Liu, J. Yuan, H. Jin, S. Zhong, Z. Xu, V. Braverman, B. Chen, and
+      from algorithms to systems,” arXiv preprint arXiv:2312.15234, 2023.               X. Hu, “Kivi: A tuning-free asymmetric 2bit quantization for kv cache,”
+                                                                                        arXiv preprint arXiv:2402.02750, 2024.
+ [5] Z. Yuan, Y. Shang, Y. Zhou, Z. Dong, C. Xue, B. Wu, Z. Li, Q. Gu,
+      Y. J. Lee, Y. Yan et al., “Llm inference unveiled: Survey and roofline      [23] H. Kang, Q. Zhang, S. Kundu, G. Jeong, Z. Liu, T. Krishna, and
+      model insights,” arXiv preprint arXiv:2402.16363, 2024.                           T. Zhao, “Gear: An efficient kv cache compression recipefor near-
+                                                                                        lossless generative inference of llm,” arXiv preprint arXiv:2403.05527,
+ [6] Z. Zhou, X. Ning, K. Hong, T. Fu, J. Xu, S. Li, Y. Lou, L. Wang,                   2024.
+      Z. Yuan, X. Li et al., “A survey on efficient inference for large language
+      models,” arXiv preprint arXiv:2404.14294, 2024.                             [24] A. Liu, J. Liu, Z. Pan, Y. He, G. Haffari, and B. Zhuang, “Minicache:
+                                                                                        Kv cache compression in depth dimension for large language models,”
+ [7] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez,            arXiv preprint arXiv:2405.14366, 2024.
+      Ł. Kaiser, and I. Polosukhin, “Attention is all you need,” Advances in
+      neural information processing systems, vol. 30, 2017.                       [25] Z. Zheng, X. Ren, F. Xue, Y. Luo, X. Jiang, and Y. You, “Response
+                                                                                        length perception and sequence scheduling: An llm-empowered llm
+ [8] A. Radford, K. Narasimhan, T. Salimans, I. Sutskever et al., “Improving            inference pipeline,” Advances in Neural Information Processing Systems,
+      language understanding by generative pre-training,” 2018.                         vol. 36, 2024.
+
+ [9] R. Pope, S. Douglas, A. Chowdhery, J. Devlin, J. Bradbury, J. Heek,          [26] Y. Jin, C.-F. Wu, D. Brooks, and G.-Y. Wei, “S3: Increasing gpu
+      K. Xiao, S. Agrawal, and J. Dean, “Efficiently scaling transformer                utilization during generative inference for higher throughput,” Advances
+      inference,” Proceedings of Machine Learning and Systems, vol. 5, pp.              in Neural Information Processing Systems, vol. 36, pp. 18 015–18 027,
+      606–624, 2023.                                                                    2023.
+
+[10] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez,        [27] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun, “Orca: A
+      H. Zhang, and I. Stoica, “Efficient memory management for large                   distributed serving system for {Transformer-Based} generative models,”
+      language model serving with pagedattention,” in Proceedings of the 29th           in 16th USENIX Symposium on Operating Systems Design and Imple-
+      Symposium on Operating Systems Principles, 2023, pp. 611–626.                     mentation (OSDI 22), 2022, pp. 521–538.
+
+[11] “Text generation inference: A rust, python and grpc server for               [28] C. Holmes, M. Tanaka, M. Wyatt, A. A. Awan, J. Rasley, S. Rajbhandari,
+      text generation inference.” [Online]. Available: https://github.com/              R. Y. Aminabadi, H. Qin, A. Bakhtiari, L. Kurilenko et al., “Deepspeed-
+      huggingface/text-generation-inference                                             fastgen: High-throughput text generation for llms via mii and deepspeed-
+                                                                                        inference,” arXiv preprint arXiv:2401.08671, 2024.
+[12] “Tensorrt-llm: A tensorrt toolbox for optimized large language
+      model inference.” [Online]. Available: https://github.com/NVIDIA/           [29] A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani,
+      TensorRT-LLM                                                                      A. Tumanov, and R. Ramjee, “Taming throughput-latency tradeoff in llm
+                                                                                        inference with sarathi-serve,” arXiv preprint arXiv:2403.02310, 2024.
+[13] R. Prabhu, A. Nayak, J. Mohan, R. Ramjee, and A. Panwar, “vattention:
+      Dynamic memory management for serving llms without pagedattention,”         [30] C. Hu, H. Huang, L. Xu, X. Chen, J. Xu, S. Chen, H. Feng, C. Wang,
+      arXiv preprint arXiv:2405.04437, 2024.                                            S. Wang, Y. Bao et al., “Inference without interference: Disaggre-
+                                                                                        gate llm inference for mixed downstream workloads,” arXiv preprint
+                                                                                        arXiv:2401.11181, 2024.
+
+                                                                                  [31] P. Patel, E. Choukse, C. Zhang, ´I. Goiri, A. Shah, S. Maleki, and
+                                                                                        R. Bianchini, “Splitwise: Efficient generative llm inference using phase
+                                                                                        splitting,” arXiv preprint arXiv:2311.18677, 2023.
+
+                                                                                  [32] Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang,
+                                                                                        “Distserve: Disaggregating prefill and decoding for goodput-optimized
+                                                                                        large language model serving,” arXiv preprint arXiv:2401.09670, 2024.
+
+                                                                                  [33] Z. XUANLEI, B. Jia, H. Zhou, Z. Liu, S. Cheng, and Y. You, “Hetegen:
+                                                                                        Efficient heterogeneous parallel inference for large language models on
+                                                                                        resource-constrained devices,” Proceedings of Machine Learning and
+                                                                                        Systems, vol. 6, pp. 162–172, 2024.
+[34] H. Oh, K. Kim, J. Kim, S. Kim, J. Lee, D.-s. Chang, and J. Seo, “Exegpt:      [55] B. Li, Y. Jiang, V. Gadepally, and D. Tiwari, “Toward sustainable genai
+      Constraint-aware resource scheduling for llm inference,” in Proceedings            using generation directives for carbon-friendly large language model
+      of the 29th ACM International Conference on Architectural Support for              inference,” arXiv preprint arXiv:2403.12900, 2024.
+      Programming Languages and Operating Systems, Volume 2, 2024, pp.
+      369–384.                                                                     [56] K. Hong, G. Dai, J. Xu, Q. Mao, X. Li, J. Liu, Y. Dong, Y. Wang
+                                                                                         et al., “Flashdecoding++: Faster large language model inference with
+[35] Y. Mei, Y. Zhuang, X. Miao, J. Yang, Z. Jia, and R. Vinayak, “Helix:                asynchronization, flat gemm optimization, and heuristics,” Proceedings
+      Distributed serving of large language models via max-flow on hetero-               of Machine Learning and Systems, vol. 6, pp. 148–161, 2024.
+      geneous gpus,” arXiv preprint arXiv:2406.01566, 2024.
+                                                                                   [57] C. Lin, Z. Han, C. Zhang, Y. Yang, F. Yang, C. Chen, and L. Qiu, “Parrot:
+[36] X. Miao, C. Shi, J. Duan, X. Xi, D. Lin, B. Cui, and Z. Jia, “Spotserve:            Efficient serving of llm-based applications with semantic variable,” arXiv
+      Serving generative large language models on preemptible instances,” in             preprint arXiv:2405.19888, 2024.
+      Proceedings of the 29th ACM International Conference on Architectural
+      Support for Programming Languages and Operating Systems, Volume 2,           [58] J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, and T. Dao,
+      2024, pp. 1112–1127.                                                               “Flashattention-3: Fast and accurate attention with asynchrony and low-
+                                                                                         precision,” arXiv preprint arXiv:2407.08608, 2024.
+[37] Y. Fu, L. Xue, Y. Huang, A.-O. Brabete, D. Ustiugov, Y. Patel, and
+      L. Mai, “Serverlessllm: Locality-enhanced serverless inference for large     [59] L. Chen, M. Zaharia, and J. Zou, “Frugalgpt: How to use large language
+      language models,” arXiv preprint arXiv:2401.14351, 2024.                           models while reducing cost and improving performance,” arXiv preprint
+                                                                                         arXiv:2305.05176, 2023.
+[38] T. Griggs, X. Liu, J. Yu, D. Kim, W.-L. Chiang, A. Cheung, and I. Stoica,
+      “M\’elange: Cost efficient large language model serving by exploiting        [60] X. Miao, G. Oliaro, Z. Zhang, X. Cheng, Z. Wang, Z. Zhang, R. Y. Y.
+      gpu heterogeneity,” arXiv preprint arXiv:2404.14527, 2024.                         Wong, A. Zhu, L. Yang, X. Shi et al., “Specinfer: Accelerating large
+                                                                                         language model serving with tree-based speculative inference and ver-
+[39] B. Sun, Z. Huang, H. Zhao, W. Xiao, X. Zhang, Y. Li, and W. Lin,                    ification,” in Proceedings of the 29th ACM International Conference
+      “Llumnix: Dynamic scheduling for large language model serving,” arXiv              on Architectural Support for Programming Languages and Operating
+      preprint arXiv:2406.03243, 2024.                                                   Systems, Volume 3, 2024, pp. 932–949.
+
+[40] P. Patel, E. Choukse, C. Zhang, I´. Goiri, B. Warrier, N. Mahalingam, and     [61] I. Ong, A. Almahairi, V. Wu, W.-L. Chiang, T. Wu, J. E. Gonzalez,
+      R. Bianchini, “Characterizing power management opportunities for llms              M. W. Kadous, and I. Stoica, “Routellm: Learning to route llms with
+      in the cloud,” in Proceedings of the 29th ACM International Conference             preference data,” arXiv preprint arXiv:2406.18665, 2024.
+      on Architectural Support for Programming Languages and Operating
+      Systems, Volume 3, 2024, pp. 207–222.
+
+[41] Z. Yang, Y. Yang, C. Zhao, Q. Guo, W. He, and W. Ji, “Perllm:
+      Personalized inference scheduling with edge-cloud collaboration for
+      diverse llm services,” arXiv preprint arXiv:2405.14636, 2024.
+
+[42] X. Miao, G. Oliaro, X. Cheng, M. Wu, C. Unger, and Z. Jia, “Flexllm:
+      A system for co-serving large language model inference and parameter-
+      efficient finetuning,” arXiv preprint arXiv:2402.18789, 2024.
+
+[43] J. Liu, Z. Wu, J.-W. Chung, F. Lai, M. Lee, and M. Chowdhury,
+      “Andes: Defining and enhancing quality-of-experience in llm-based text
+      streaming services,” arXiv preprint arXiv:2404.16283, 2024.
+
+[44] P. Lewis, E. Perez, A. Piktus, F. Petroni, V. Karpukhin, N. Goyal,
+      H. Ku¨ttler, M. Lewis, W.-t. Yih, T. Rockta¨schel et al., “Retrieval-
+      augmented generation for knowledge-intensive nlp tasks,” Advances in
+      Neural Information Processing Systems, vol. 33, pp. 9459–9474, 2020.
+
+[45] Y. Zhu, J.-C. Gu, C. Sikora, H. Ko, Y. Liu, C.-C. Lin, L. Shu,
+      L. Luo, L. Meng, B. Liu et al., “Accelerating inference of retrieval-
+      augmented generation via sparse context selection,” arXiv preprint
+      arXiv:2405.16178, 2024.
+
+[46] C. Jin, Z. Zhang, X. Jiang, F. Liu, X. Liu, X. Liu, and X. Jin, “Ragcache:
+      Efficient knowledge caching for retrieval-augmented generation,” arXiv
+      preprint arXiv:2404.12457, 2024.
+
+[47] J. Yao, H. Li, Y. Liu, S. Ray, Y. Cheng, Q. Zhang, K. Du, S. Lu, and
+      J. Jiang, “Cacheblend: Fast large language model serving with cached
+      knowledge fusion,” arXiv preprint arXiv:2405.16444, 2024.
+
+[48] J. Li, Y. Jiang, Y. Zhu, C. Wang, and H. Xu, “Accelerating distributed
+      {MoE} training and inference with lina,” in 2023 USENIX Annual
+      Technical Conference (USENIX ATC 23), 2023, pp. 945–959.
+
+[49] J. Yao, Q. Anthony, A. Shafi, H. Subramoni, and D. K. D. Panda,
+      “Exploiting inter-layer expert affinity for accelerating mixture-of-experts
+      model inference,” in 2024 IEEE International Parallel and Distributed
+      Processing Symposium (IPDPS). IEEE, 2024, pp. 915–925.
+
+[50] Z. Du, S. Li, Y. Wu, X. Jiang, J. Sun, Q. Zheng, Y. Wu, A. Li, H. Li,
+      and Y. Chen, “Sida: Sparsity-inspired data-aware serving for efficient
+      and scalable large mixture-of-experts models,” Proceedings of Machine
+      Learning and Systems, vol. 6, pp. 224–238, 2024.
+
+[51] L. Xue, Y. Fu, Z. Lu, L. Mai, and M. Marina, “Moe-infinity: Activation-
+      aware expert offloading for efficient moe serving,” arXiv preprint
+      arXiv:2401.14361, 2024.
+
+[52] K. Kamahori, Y. Gu, K. Zhu, and B. Kasikci, “Fiddler: Cpu-gpu
+      orchestration for fast inference of mixture-of-experts models,” arXiv
+      preprint arXiv:2402.07033, 2024.
+
+[53] H. Huang, N. Ardalani, A. Sun, L. Ke, H.-H. S. Lee, A. Sridhar,
+      S. Bhosale, C.-J. Wu, and B. Lee, “Towards moe deployment: Mitigating
+      inefficiencies in mixture-of-expert (moe) inference,” arXiv preprint
+      arXiv:2303.06182, 2023.
+
+[54] Y. Sheng, S. Cao, D. Li, B. Zhu, Z. Li, D. Zhuo, J. E. Gonzalez, and
+      I. Stoica, “Fairness in serving large language models,” arXiv preprint
+      arXiv:2401.00588, 2023.
+

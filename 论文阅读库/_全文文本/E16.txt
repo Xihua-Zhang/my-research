@@ -1,0 +1,1555 @@
+                                        LAVa: Layer-wise KV Cache Eviction with Dynamic Budget Allocation
+
+                                        Yiqun Shen12*  Song Yuan3 Zhengze Zhang12 Xiaoliang Wang12
+                                                       Daxin Jiang3 Cam Tu Nguyen12†
+
+                                        1State Key Laboratory for Novel Software Technology, Nanjing University
+                                              2School of Artificial Intelligence, Nanjing University 3Stepfun
+
+                                                       yiqunshen@smail.nju.edu.cn
+
+                                                       ncamtu@nju.edu.cn
+
+arXiv:2509.09754v1 [cs.LG] 11 Sep 2025                        Abstract                                and et al., 2024), and Qwen2.5 Max (Qwen and
+                                                                                                      et al., 2025) have extended their context lengths
+                                             KV Cache is commonly used to accelerate                  beyond 128K tokens. However, supporting such
+                                             LLM inference with long contexts, yet its high           long contexts comes with increased computational
+                                             memory demand drives the need for cache com-             challenges. One common approach to accelerating
+                                             pression. Existing compression methods, how-             LLM inference is caching Key and Value vectors
+                                             ever, are largely heuristic and lack dynamic             (KV Cache), but its high memory demand necessi-
+                                             budget allocation. To address this limitation,           tates efficient cache compression techniques.
+                                             we introduce a unified framework for cache
+                                             compression by minimizing information loss                  While existing compression methods have
+                                             in Transformer residual streams. Building on             shown promise, they are largely heuristic, relying
+                                             it, we analyze the layer attention output loss           on statistical measures such as accumulated atten-
+                                             and derive a new metric to compare cache en-             tion scores (Zhang et al., 2023; Li et al., 2024).
+                                             tries across heads, enabling layer-wise com-             These metrics are derived from empirical observa-
+                                             pression with dynamic head budgets. Addition-            tions rather than a theoretical foundation. Addi-
+                                             ally, by contrasting cross-layer information, we         tionally, although dynamic head allocation (Feng
+                                             also achieve dynamic layer budgets. LAVa is              et al., 2024) and dynamic layer allocation (Qin
+                                             the first unified strategy for cache eviction and        et al., 2025) have been explored, no method, to our
+                                             dynamic budget allocation that, unlike prior             knowledge, fully adapts head and layer budgets.
+                                             methods, does not rely on training or the com-
+                                             bination of multiple strategies. Experiments                To address this gap, we propose a unified frame-
+                                             with benchmarks (LongBench, Needle-In-A-                 work for cache compression, which is formulated
+                                             Haystack, Ruler, and InfiniteBench) demon-               through the lens of minimizing information loss
+                                             strate its superiority. Moreover, our experi-            in Transformer residual streams (see Figure 1, and
+                                             ments reveal a new insight: dynamic layer bud-           Sec. 3). Many existing methods can be formulated
+                                             gets are crucial for generation tasks (e.g., code        within our framework. Specifically, context com-
+                                             completion), while dynamic head budgets play             pression methods (Qin et al., 2024a,b) aim to mini-
+                                             a key role in extraction tasks (e.g., extractive         mize global information loss at the logits layer. KV
+                                             QA). As a fully dynamic compression method,              Cache compression methods (Zhang et al., 2023;
+                                             LAVa consistently maintains top performance              Cai et al., 2024; Qin et al., 2025) primarily focus
+                                             across task types. Our code is available at              on local information loss at the head or layer levels.
+                                             https://github.com/MGDDestiny/Lava.
+                                                                                                         Our framework provides a principled approach
+                                        1 Introduction                                                to designing new algorithms. This paper introduces
+                                                                                                      a novel method based on Layer Attention Output
+                                        Large language models (LLMs) have shown re-                   Loss, which measures the impact of compression
+                                        markable capability in handling long-text scenarios,          on the information retained in each layer after
+                                        enabling advancements in tasks such as question               multi-head attention. The layer-wise loss function
+                                        answering (Kamalloo et al., 2023), code genera-               provides a balanced perspective on both local infor-
+                                        tion (Guo et al., 2023), and multi-turn dialogues             mation within layers and global information flow
+                                        (Chiang et al., 2023). To further enhance external            across layers. Within each layer, the loss function
+                                        knowledge integration, state-of-the-art models like           guides the design of a scoring mechanism to assess
+                                        Claude 3.5 (Anthropic and et al.), GPT-4 (OpenAI              token importance across heads, allowing for simul-
+                                                                                                      taneous head budget allocation and cache eviction.
+                                            *This work was done during Shen’s internship at Stepfun.
+                                            †Corresponding author
+           Next Token                                                                                     Logit Loss
+
+         Unembedding                                                                                    Layer Output
+              Layer                                                                                          Loss
+
+                                                                         FFN                            Layer Attention
+                                                                                                         Output Loss
+Layer L
+
+Layer 2                                                                  Head1             Head Attention
+Layer 1                                                                              Head2  Output Loss
+                                                                                                 Head3
+                                                                                          Head Attention
+                                                                                                  Loss
+
+                                                                              MHA
+
+                       Current Step                  Expected Last Step
+
+         (the -th Residual Stream) (Last Residual Stream)
+
+Figure 1: Information flow in decoder-only LLMs. The decoding process can be seen as operating on the current
+residual stream. Each residual stream (red lines) corresponds to one token, and is considered as a communication
+channel. Attention heads copy information from past residual streams to the current one (green lines) .
+
+Across layers, it enables dynamic layer budget al-   the best of our knowledge, LAVa is the first training-
+location by comparing information between layers.    free method to achieve dynamic budget allocation
+Our method is theoretically grounded, and signifi-   without relying on multiple combined metrics, mak-
+cantly simpler than CAKE, the only training-free     ing it simple for practical purposes. 3) Evaluations
+method with dynamic layer budgets.                   on LongBench, Needle in a Haystack, Ruler and
+                                                     InfiniteBench demonstrate that our simple method
+   Extensive experiments were conducted using var-   outperforms strong baselines. 4) Experiments
+ious LLM series on the LongBench and Needle in       reveal new insights into the role of dynamic budget
+a Haystack benchmarks. The results consistently      allocation across different tasks, offering guidance
+demonstrate LAVa’s strong ability to preserve the    for the adaptive selection of strategies.
+model’s long-text comprehension under various
+memory constraints. Additionally, compared to        2 The Information Flow of LLM
+a full cache implementation of FlashAttention-2,         Decoding Process with KV Cache
+LAVa significantly reduces memory consumption
+while simultaneously reducing latency (9× faster     KV Cache is initialized at prefilling stage, which
+decoding for 128K-token sequences). Our empiri-      basically computes the Key and Value for tokens
+cal findings highlight that dynamic layer budgets    in the initial prompts in the standard way (Vaswani,
+are essential for generation tasks, while dynamic    2017). In the following, we assume that there ex-
+head budgets are crucial for text extraction tasks.  ists a KV Cache of (N − 1) previous tokens and
+Achieving dynamic budget allocation at both the      demonstrate how decoding is performed at step-N .
+head and layer levels is key to optimizing perfor-
+mance across different tasks.                        Notations The LLM has L layers, each has H
+                                                     heads. The model and head dimensions are d and
+   Our Contributions: 1) We introduce a principled   dh = d/H; Kl, Vl are the KV Cache for the l-th
+framework for KV Cache eviction by analyzing         layer up to the current time step (the N -th token),
+the information flow through Transformer residual    which are of [H, (N − 1), dh] sizes. The full nota-
+streams, accounting for information loss at var-     tion Table 3 is in Appendix A.
+ious points during decoding. 2) Building on this
+framework and the notion of information loss at the  Decoding Process According to (Ferrando and
+layer-wise attention output, we propose LAVa—a       Voita, 2024), LLM decoding can be viewed as op-
+unified method that simultaneously performs KV       erating on the current (N -th) residual stream, as
+cache eviction and dynamic budget allocation. To     illustrated in Figure 1. Specifically, suppose that
+xNl is the current input for layer l, we first calculate           Here, Bl,h represents the budget for layer-l and
+the corresponding QlN , KlN , VlN as follows:                   head-h, Bl denotes the total budget for layer-l. The
+                                                                final constraint ensures that the most recent tokens
+ QNl = xlN WlQ; KlN = xNl WlK ; VlN = xlN WlV                   within a window of size w are retained for all heads,
+                                                                aligning with the common practice in the literature.
+where QNl , KlN , VlN are of size (H × 1 × dh), con-
+taining H head-wise caches. The layer-wise KV                      As computing the loss over future, unseen tokens
+Cache is then updated as follows:                               is impractical. To address this, we approximate the
+                                                                loss by considering only residual streams up to the
+Kl = Cat[Kl, KlN ], Vl = Cat[Vl, VlN ]                          current step N . Considering the current step-N ,
+                                                                one can define P as the cross-entropy loss between
+where Kl, Vl are tensors of size (H × N × dh), and              pN and pˆN , which is the logit obtained with the at-
+Cat indicates the concatenation operation.We then               tention mask (Qin et al., 2024a). Additionaly, since
+calculate the attention scores of step-N for layer-l:           the search space for the mask matrix is combina-
+                                                                torial, we instead search for a scoring function s,
+              ANl = Cath∈[H] AlN,h                              where sl,h[i] assigns an importance score to token i
+                                                                at layer l and head h. This scoring function allows
+where AlN,h      =  Sof       tmax(  QNl,h√(Kl,h )T  ).  Here,  us to greedily choose the least important entries to
+                                             dh                 be masked I = Select(s, B). All in all, we have
+ANl,h[i] indicates how much the token at step-N                 the following (surrogate) optimization problem:
+
+attends to the token-i (i ≤ N ). Layer-l attention
+
+output is calculated as follows:
+
+     ylN = Cath∈[H](AlN,hVl,h)WlO ∈ R1×d
+
+   The layer output xlN+1 is calculated as xNl+1 =              min    P (x11...N  ,  s,  B)  (2)
+ylN + F F N (ylN ), which is then passed as the input
+the next layer l + 1. In the last layer, we exploit             B,s∈F
+
+an un-embedding layer (W M ∈ Rd×|V|) to get the                 where F denotes the space of all scoring functions.
+probability vector pN for next token sampling.                  The scoring function can be parameterized by a
+                                                                network ϕ, which is then found through offline
+3 A Principled Framework for KV Cache                           training. This is the common approach employed in
+    Eviction based on Information Loss                          context compression methods (Qin et al., 2024a,b).
+
+Given the KV Cache, compression can be seen                        The aforementioned approach to minimizing
+as masking entries in the KV tensors so that the                Global Logit Loss can be impractical for online
+attention heads cannot copy masked information to               inference when the scoring function is computa-
+the later residual streams. Formally, one can define            tionally expensive. A more feasible alternative is
+the attention mask Il,h for layer-l and head-h:                 to focus on local information and apply localized
+                                                                KV Cache eviction. For instance, Head Attention
+Il,h[i] =     1     if Kl,h[i] and Vl,h[i] are retained         Loss can be used for head-wise eviction, a strategy
+              0     evict Kl,h[i] and Vl,h[i]                   adopted by most existing methods (Zhang et al.,
+                                                                2023; Li et al., 2024; Qin et al., 2025). In this case,
+   The goal is to find a KV Cache eviction policy so            the scoring functions are lightweight, relying on
+that to minimize the information loss for the logits            simple statistical features, like head-wise attention
+at the last layer (pN ) for all subsequent residual             weights. Table 1 summarizes how existing meth-
+streams (from N to Ne; see Figure 1). Let P denote              ods can be formalized within our framework, with
+this logit loss, and B be the memory constraint. The            further details provided in Appendix B.
+unified problem for budget allocation and cache
+eviction can be defined as follows:                             4 LAVa: Layer-wise Cache Eviction with
+                                                                    Dynamic Budget Allocation
+
+     min   P  (x11...N  ,  I  ,  B)                      (1)    4.1 Layer Attention Output Loss and the
+                                                                      Scoring Function
+     I,B
+                                                                The aforementioned framework provides a prin-
+st.          Il,h[i] = Bl,h;                                    cipled approach to designing new algorithms for
+                                                                KV Cache eviction. This section demonstrates the
+     i∈[N ]                                                     design of our novel algorithm based on Layer At-
+                                                                tention Output Loss (see Figure 1). Specifically, we
+             Bl,h = Bl; Bl = B
+
+     h∈[H ]                   l∈[L]
+
+Il,h[k] = 1 , ∀l, h; and ∀k ∈ [N − w, N ]
+Methods                             Budgets      Scoring Function                                        Loss
+SnapKV (Li et al., 2024)
+CAKE (Qin et al., 2025)    Bl,h              Bl                                                          Head Attention
+
+AdaKV (Feng et al., 2024)  Bl/H     B/L          Recent attention scores                                 Layer Attention
+LAVa (Ours)                                                                                              Output
+                                                 sl,h[i] =   1    N          Ajl,h[i],  ∀i  <  N  −  w
+                                                             w    j=N −w
+
+                           Bl/H Dynamic          Recent attention scores + attention shifts
+
+                                                 sl,h[i] = γVARjN=N−w([Alj,h[i]))
+
+                                                 +     1  N       Alj,h[i],  ∀i  <  N   −   w
+                                                       w  j=N −w
+
+                           Dynamic Fixed         Recent attention scores (like SnapKV)
+                           Dynamic Dynamic
+                                                 Recent attention scores × value norm
+
+                                                 sl,h[i]  =  maxk ∥Vl,h[k]∥1     N             Alj,h[i]
+                                                                        w        j=N −w
+
+Table 1: Summary of representative methods for KV Cache compression. LAVa is the only method to support
+
+dynamic head (Bl,h) and layer (Bl) budgets. For the full table and more comparison, please refer to Appendix B.
+                                                                           .
+
+show how our scoring function is designed based           bound. Notably, this function incorporates a head-
+on analyzing the upper bound of the loss and how          dependent value V¯l,h, which should not be ignored
+we can exploit the scoring function for layer-wise        when comparing KV Cache entries across different
+cache eviction with dynamic budget allocation.            heads. This is different from AdaKV (Feng et al.,
+                                                          2024), which considers the layer attention output
+Lemma 1. Based on the Lp norm, the layer at-              loss yet does not take into account the values. This
+tention output loss due to the attention mask I is        also provides a theoretical justification for the intro-
+measured for layer-l at the current (N -th) residual      duction of values into the scoring, which has been
+stream as follows:                                        exploited heuristically in VATP (Guo et al., 2024).
+                                                          4It is noted that we derive our metric through a de-
+P(x11...N , I, B) = ∥ylN − yˆlN ∥p            (3)         tailed reasoning process, independently from VATP.
+                                                          The process is key to understanding the approxima-
+= Cath  AlN,h   −    ANl,h ⊙ Il,h   Vl,h WlO              tions we introduce, which enable future improve-
+                   ∥AlN,h ⊙ Il,h∥1                        ments. Moreover, recognizing that the metric is
+                                                      p   inherently grounded in a layer-wise perspective
+                                                          enables the design of dynamic budget allocation
+where ⊙ indicates element-wise multiplication and         strategies, as demonstrated below. Empirical com-
+yˆlN indicates the layer attention output obtained by     parison to VATP is given in Table 5.
+masking the KV Cache with I (equivalently, after
+KV Cache eviction).                                          The scoring function sl,h[i] = ANl,h[i]V¯l,h de-
+                                                          scribed earlier is based solely on analyzing the cur-
+   We then develop a new upper bound for the L1           rent residual stream (the N -th decoding step). To
+norm and provide the result in Theorem 1. The             improve the performance for KV Cache eviction,
+proof of these are both provided in Appendix C.           we can incorporate information from all past resid-
+                                                          ual streams similarly to H2O (Zhang et al., 2023).
+Theorem 1. The L1 norm of the layer attention             However, doing so introduces more computational
+output loss can be bounded by:                            overhead. Inspired by SnapKV (Li et al., 2024),
+                                                          we instead incorporate information from recent w
+∥ylN − yˆlN ∥1        ANl,h[i]V¯l,h (1 − Il,h[i]) (4)     residual streams, yielding a new scoring function.
+  ≤ 2Cˆ
+                                                          Definition 1. Layer-wise Attention and Value
+        h∈[H] i∈[N ]                                      (LAVa) score for the token-i at layer-l, head-h is
+                                                          defined as follows:
+where Cˆ = ∥WlOT ∥1 is a constant indepen-
+dent of any head or token within layer-l; V¯l,h =                     maxk∈[N ] ∥Vl,h [k]∥1              N
+maxk∈[N]∥Vl,h[k]∥1 is a head-dependent value.                                    w
+                                                          sl,h[i]  =                                             Ajl,h[i] (5)
+   Given a fixed budget Bl, we consider a greedy
+algorithm that iteratively evicts one cache entry at a                                                   j=N −w
+time until the cache budget is met. We evict the en-
+tries with the smallest scores, given by the scoring         Based on this scoring function, we develop the
+function sl,h[i] = AlN,h[i]V¯l,h to minimize the upper    layer-wise KV Cache eviction as outlined in Al-
+                                                          gorithm 1. Notably, we only evict entries outside
+Algorithm 1 LayerEvict: Layer-wise KV Cache            Algorithm 2 LAVa: Dynamic Budget Allocation
+
+Eviction based on LAVa Score                           and Cache Eviction based on LAVa Score
+
+1: Input: Budget Bl, KV Cache Kl, Vl                   1: Input: Total Budget B, KV Cache K, V Num-
+2: Output: Compressed KV Cache Kˆl, Vˆl
+                                                          ber of Layers L
+3: sl = [ ]                                            2: Output: Compressed KV Cache Kˆ , Vˆ
+                                                       3: s = [ ], e = [ ], Kˆ = K, Vˆ = V
+4: for h = 1 to H do
+
+5: Calculate sl,h[i], ∀i ∈/ [N − w, N ] based          4: for l = 1 to L do
+
+     on Eq. 5                                          5: Calculate sl based on Eq. 5
+
+6: sl.extend(sl,h)                                     6: Calculate el based on Eq. 6, 7
+7: end for
+                                                       7: s.append(sl)
+
+8: function EVICT(Bl, sl, Kl, Vl)                      8: e.append(el)
+                                                       9: for ˜l = 1 to l do
+9: Sl ← Bl largest entries based on sl                                     B e˜l
+
+10: Il,h[k] = 0, ∀(h, k) ∈/ Sl                         10:  B˜l =          l el
+
+11: for h = 1 to H do                                  11:  Kˆ˜l, Vˆ˜l = EVICT(B˜l, s˜l, Kˆ˜l, Vˆ˜l)
+
+12:  Kˆl,h = Kl,h ⊙ Il,h                               12: end for
+
+13:  Vˆl,h = Vl,h ⊙ Il,h                               13: end for
+                                                       14: Return Kˆ , Vˆ
+14: end for
+
+15: Return Kˆl, Vˆl
+
+16: end function
+
+17: Return EVICT(Bl, sl, Kl, Vl)                       normalizing the LAVa scoring values:
+
+the recent window [N − w, N ], effectively retain-          sˆl,h[i] =            sl,h[i]              (6)
+ing the most recent tokens as specified by the final                              k,h sl,h[k]
+constraint in the optimization problem (Eq. 1).
+                                                       The uncertainty for layer-l is then measured by the
+Dynamic Head Budget. Our eviction method op-           normalized entropy as follows:
+erates across attention heads within layer-l. Specif-
+ically, we flatten the LAVa scores from all heads                 −        h,i(sˆl,h[i] log sˆl,h[i])  (7)
+in the layer into a one-dimensional array sl (Algo-         el =               H ×N
+rithm 1, lines 3–6). We then compare and rank Bl
+cache entries across all heads for layer-wise evic-       With such a measure, we can first initialize all
+tion, effectively obtaining dynamic head budget        KV Cache through prefilling, followed by cache
+while performing eviction.                             compression. Unfortunately, this approach results
+                                                       in a high memory peak after prefilling (and before
+4.2 Layer Budget Allocation                            compression). To address this, the common prac-
+                                                       tice is that we perform prefilling and cache eviction
+Recently, CAKE (Qin et al., 2025) and PyramidKV        layer by layer. For dynamic layer budget allocation,
+(Cai et al., 2024) have demonstrated the potential     we draw inspiration from CAKE: after prefilling
+of allocating different budgets across layers. Pyra-   layer-l, the lower layers (< l) are recompressed.
+midKV, however, is suboptimal as it assigns a fixed    As a result, a lower layer is compressed multiple
+allocation pattern regardless of the input. In con-    times using the same LAVa scores, but the budget is
+trast, CAKE is prompt-dependent allocation (dy-        adjusted, becoming smaller over time as the mem-
+namic) but combines different scores for cache evic-   ory is shared with more layers being prefilled. The
+tion and budget allocation, which requires tuning      complete algorithm is outlined in Algorithm 2.
+three hyperparameters, hindering its practical ap-
+plication. Below, we describe our hyperparameter-      4.3 LLMs with GQA
+free algorithm based on the LaVa score.
+                                                       Group Query Attention (GQA) (Ainslie et al.,
+   Our key idea is that layers with greater uncer-     2023) is the technique most modern LLMs adopt
+tainty in determining which cache entry to evict       due to its balance between performance loss and
+should be allocated a larger budget. Specifically,     memory efficiency. In GQA, the KV Cache is
+based on the LAVa score, the probability of evict-     compressed by sharing a single KV Cache among
+ing token-k at layer-l and head-h is obtained by       all heads within a group. When applying LAVa
+                                                       scores to GQA, we take a conservative approach:
+the group-wise score for a token is determined as         tation of LAVa and all the baselines. For pooling
+the maximum of its head-wise scores within the            operation, for all methods, we adopt maxpool func-
+corresponding group. In other words, we tend to           tion and set kernel size as 7. More information
+retain the entry as long as it is important for at least  is given in Appendix B, and for implementation
+one head within the group.                                details, please refer to Appendix D.
+
+5 Experiments                                             5.2 Main Results
+
+5.1 Experimental Settings                                 Table 2 presents the results of Mistral-7B with dif-
+                                                          ferent eviction policies on LongBench, revealing
+Backbone LLMs. We evaluate three series of                several key observations. First, LAVa outperforms
+LLMs: Mistral-7B-Instruct-v0.2 (Jiang et al.,             all baselines across different budgets, with a more
+2023), Qwen2.5-7/14/32B-Instruct (Qwen and                pronounced advantage at smaller budgets. Sec-
+et al., 2025), all with a context length of 32k and       ond, among methods requiring no hyperparameter
+Llama3-8B-Instruct with 8k context length. These          tuning (SnapKV, Ada-SnapKV, and LAVa), LAVa
+models are widely adopted for their moderate pa-          achieves the best performance, significantly sur-
+rameter sizes and strong performance all utilizing        passing others. For instance, at B = 128HL, LAVa
+GQA (Ainslie et al., 2023).                               achieves an average score of 36.74, compared
+                                                          to Ada-SnapKV’s 35.82. And finally, LAVa and
+Evaluation Benchmarks. To validate the effec-             CAKE excel in code-related tasks. On RepoBench-
+tiveness of our algorithm, we perform evaluation          P with a 128HL budget, LAVa (48.92) and CAKE
+LongBench (Bai et al., 2024), a bilingual, multi-         (48.53) outperform Ada-SnapKV (46.85) by a sig-
+task benchmark for long-context understanding. It         nificant margin. This is interesting given that
+comprises 21 datasets across six task categories          Ada-SnapKV surpasses CAKE on average over
+in both English and Chinese, with an average              20 datasets. Similar trends are observed with the
+length of 6,711 words (English) and 13,386 char-          Qwen series and presented in Appendix D.
+acters (Chinese). LongBench covers key long-
+text application areas, including single-document            To further investigate the last observation, we cat-
+QA, multi-document QA, summarization, few-shot            egorize the 20 LongBench datasets into two types:
+learning, synthetic tasks, and code completion.           extraction tasks, which require extracting answers
+We also conduct experiments on Needle In A                from the context (e.g., QA tasks evaluated with F1
+Haystack (Cai et al., 2024; Liu et al., 2024; Fu          or Accuracy), and generation tasks (e.g., summa-
+et al., 2024), Ruler (Hsieh et al., 2024) and In-         rization and code completion). For each category,
+finiteBench (Zhang et al., 2024), of which the re-        we then compute the average scores obtained with
+sults are given in Appendix D.                            Qwen and Mistral under varying cache budgets and
+                                                          eviction policies. Figure 2 highlights several key
+Baseline Methods. We compare our meth-                    findings: 1) Extraction tasks are generally less af-
+ods against several baselines: PyramidKV,                 fected by compression, as LLM performance with
+SnapKV, Ada-SnapKV, Ada-PyramidKV, and                    a compressed cache remains closer to that with
+CAKE. Among these, PyramidKV and CAKE al-                 a full cache; 2) The performance gap among dif-
+low different layer budgets. AdaKV is derived             ferent eviction policies is greater on generation
+from the layer attention output loss but relies solely    tasks.; 3) CAKE and LAVa outperform Ada-SnapKV
+on attention for its scoring function and does not        and methods with fixed-layer budgets on genera-
+incorporate dynamic layer budget allocation. Ada-         tion tasks, though CAKE performs significantly
+SnapKV employs the same scoring function and              worse than Ada-SnapKV on extraction tasks with
+uniform layer allocation as SnapKV but allows dy-         Mistral-7B. This suggests the importance of (dy-
+namic head budgets. Ada-PyramidKV follows the             namic) layer budget allocation for generation tasks.
+same approach but assigns fixed, varying budgets          LAVa, however, consistently achieves top perfor-
+across layers like PyramidKV.                             mance across both task types and language models.
+
+   Pooling operators, such as max pooling or aver-        5.3 Evaluation of Latency and Memory Peak
+age pooling, can be applied to token score vectors
+to smooth score variations across adjacent tokens         We evaluate LAVa’s efficiency during LLM infer-
+(Li et al., 2024; Cai et al., 2024; Qin et al., 2025).    ence by analyzing peak memory usage and de-
+This strategy is also employed in the implemen-           coding latency on Mistral-7B-Instruct-v0.2, imple-
+                      Single-Doc. QA                Multi-Doc. QA                Summarization                Few-shot Learning  Synthetic               Code
+
+                                                                                                                                                                                                                                                      Avg
+                                                                                                                                                                                                                                       RepoBench-P
+                                                                                                                                                                                                                             Lcc
+
+                                                                                                                                                                                                                  PR-zh
+                                                                                                                                                                                                        PR-en
+                                                                                                                                                                                              PCount
+                                                                                                                                                                                     LSHT
+                                                                                                                                                                         SAMSum
+                                                                                                                                                              TriviaQA
+                                                                                                                                                    TREC
+                                                                                                                                       MultiNews
+                                                                                                                             VCSUM
+                                                                                                                  QMSum
+                                                                                                      GovReport
+                                                                                           Dureader
+                                                                                Musique
+                                                                    2WikiMQA
+                                                        HotpotQA
+                                             MF-zh
+                                   MF-en
+                         Qasper
+               NrtvQA
+
+Full Cache     26.77 32.34 49.63 48.42 43.43        27.89  18.61 30.85    32.92 24.54 15.04     27.20  71.00  86.23  43.41 39.00 2.81 86.56 89.75 55.29  52.55  45.07
+
+PyramidKV      20.01  19.23  43.81    32.37  35.62  22.34  14.38   17.53  18.95  B = 128HL      20.87  47.00  85.34  40.21 19.25 2.86 65.60 59.49 49.52  45.67  34.51
+SnapKV         20.99  19.65  45.04    32.02  36.48  22.19  14.04   17.68  18.83   21.91 11.07   20.29  45.00  84.10  40.01 19.75 3.06 64.48 60.50 49.84  45.27  34.42
+Ada-PyramidKV  20.21  20.80  43.82    33.65  37.21  22.99  14.93   18.06  19.41   21.36 10.91   20.97  52.00  83.93  39.97 20.00 2.81 72.73 72.89 51.00  46.62  36.22
+Ada-SnapKV     20.61  20.56  44.03    34.03  36.39  23.66  16.15   17.82  19.21   22.02 11.16   20.35  50.00  84.32  39.82 19.75 3.87 69.11 70.52 50.21  46.85  35.82
+CAKE           21.01  20.16  44.08    32.52  36.16  23.89  15.32   17.67  18.82   21.73 11.25   21.03  47.00  85.14  39.90 21.25 3.02 63.65 65.96 51.81  48.53  35.06
+LAVa (Ours)    19.57  21.11  44.29    33.91  38.29  23.59  15.32   18.56  19.33   22.62 10.93   21.07  53.50  85.20  40.16 21.75 2.88 69.87 74.75 51.94  48.92  36.74
+                                                                                  22.32 11.42
+                                                    24.02                                       22.24  58.00  84.06  40.52 22.75 2.96 74.70 83.83 51.85  48.86  38.23
+PyramidKV      20.79  22.74  45.90    35.72  38.63  25.01  15.97   18.99  21.61  B = 256HL      22.67  57.00  85.04  40.81 23.25 3.18 76.49 83.60 51.99  49.42  38.49
+SnapKV         21.39  22.15  46.50    34.77  39.68  24.86  14.86   19.11  21.61   22.34 11.02   22.29  64.00  84.93  40.36 24.50 3.40 77.39 85.83 52.48  49.43  39.43
+Ada-PyramidKV  22.61  23.84  47.65    36.56  39.33  23.65  17.22   19.65  21.22   23.04 11.46   22.39  64.00  86.33  40.54 25.25 2.23 77.44 85.42 52.31  49.62  39.40
+Ada-SnapKV     21.63  23.55  47.51    37.42  38.89  24.50  16.06   19.34  21.98   22.54 11.82   22.68  55.00  85.46  41.92 24.75 2.96 75.66 86.46 54.29  51.38  38.84
+CAKE           21.37  23.40  46.84    35.02  38.10  25.96  14.81   19.40  21.59   23.21 11.49   22.91  65.00  85.24  41.28 26.75 2.88 76.76 85.75 54.17  51.77  40.12
+LAVa (Ours)    22.70  24.67  48.62    37.81  39.68         16.77   20.26  21.92   22.77 11.32
+                                                    25.22                         22.48 11.88   24.19  66.50  86.07  41.06 28.00 3.29 87.29 88.83 53.77  50.42  41.15
+                                                    25.58                                       24.31  65.00  86.29  41.98 28.50 3.22 85.79 88.67 53.99  51.02  41.48
+PyramidKV      23.57  24.84  48.74    39.54  38.90  25.96  17.40   20.42  23.04  B = 512HL      24.04  67.50  86.44  42.58 31.50 3.38 85.88 89.67 54.15  51.30  41.89
+SnapKV         23.67  28.08  49.40    40.25  40.14  26.33  16.97   20.49  23.75   23.24 11.91   24.32  67.50  86.38  42.34 32.50 2.98 87.65 89.17 54.39  51.03  42.11
+Ada-PyramidKV  24.37  27.30  48.01    40.88  39.75  25.85  18.58   20.90  23.59   23.69 12.03   24.50  66.00  86.01  42.56 29.50 3.45 86.79 88.75 56.40  52.37  41.76
+Ada-SnapKV     24.63  27.48  48.90    41.28  39.84  26.88  18.26   20.91  23.59   23.33 12.07   24.51  68.50  86.34  42.48 33.50 2.90 87.23 89.83 55.83  52.85  42.59
+CAKE           22.76  27.54  49.47    41.27  38.17         17.26   20.60  23.72   23.51 12.27
+LAVa (Ours)    25.01  27.84  48.97    42.14  40.95  26.65  18.33   21.12  23.59   23.65 11.95   25.42  68.50  86.30  41.92 35.50 2.98 86.77 89.50 55.26  51.03  42.79
+                                                    26.92                         23.59 12.28   25.85  67.50  86.25  42.56 36.00 2.88 88.10 88.92 55.23  51.38  43.00
+                                                    26.98                                       25.61  68.50  86.30  42.84 35.50 2.89 88.18 89.25 54.51  51.32  42.90
+PyramidKV      25.62  28.96  48.35    42.18  40.89  27.39  19.69   21.96          B = 1024HL    25.85  69.00  86.23  42.84 36.25 2.90 89.02 89.75 55.38  51.93  43.34
+SnapKV         24.80  30.17  49.13    43.23  41.16  26.70  17.89   22.58  25.10 23.57 12.58     26.05  68.00  86.25  42.70 36.00 2.91 88.60 88.75 56.75  53.26  43.36
+Ada-PyramidKV  24.98  29.92  47.97    41.43  40.83  27.38  19.42   22.45  25.75 23.64 12.88     26.00  70.00  86.22  42.43 38.00 2.73 87.01 88.75 57.31  53.28  43.65
+Ada-SnapKV     24.84  29.99  49.21    42.55  41.00         19.23   23.23  25.46 23.58 12.94
+CAKE           25.15  30.34  49.00    43.08  40.86         19.93   23.07  25.89 24.18 13.13
+LAVa (Ours)    25.59  31.21  48.27    43.43  41.92         19.48   23.48  25.82 23.72 13.16
+                                                                          26.06 23.86 13.38
+
+Table 2: Final comparison based on Mistral-7B-Instruct-v0.2 among 21 datasets of LongBench. (Note: The best
+result is highlighted in bold, and the second is in underline. Due to the negligible numerical values obtained from
+the passage count dataset, its results were excluded from the computation of the average scores.)
+
+                                                                                 Figure 3: Peak memory usage and decoding latency in
+                                                                                 A800 80GB based on Mistral-7B-Instruct-v0.2.
+
+ Figure 2: Results of generation and extraction tasks.                           Peak Memory Usage. The peak memory usage
+                                                                                 of all methods generally increases with context
+mented with FlashAttention-2 (Dao, 2023). Our                                    length due to prefilling. Our method effectively
+comparison includes Full Cache, SnapKV, Ada-                                     maintains peak memory at a reasonable level, par-
+SnapKV and CAKE, all using allocation budget                                     ticularly compared to Full Cache, which encoun-
+1024HL. We set input at varying lengths while                                    ters OOM issues at higher context lengths. CAKE
+keeping the output length fixed at 128.                                          and LAVa, both employing dynamic layer budgets,
+                                                                                 generally have slightly higher peak memory usage.
+Decoding Latency. By analyzing the decoding                                      Compared to CAKE, LAVa requires additional stor-
+latency in Figure 3, we observe that our scor-                                   age for the norms of head-wise value vectors, but
+ing function and dynamic budget allocation intro-                                this extra memory overhead remains minimal.
+duce negligible decoding cost, achieving over a 9×
+speedup compared to Full Cache at a 128K context                                 Theoretical Analysis. We provide the theoretical
+length. Notably, our method is easier to deploy                                  analysis of time complexity and memory usage in
+than PyramidKV, Ada-PyramidKV, and CAKE, as                                      Appendix D. The time complexity and peak mem-
+these baselines require parameter tuning.                                        ory usage of SnapKV is O(HN (N dh + wdh +
+                                                                                 logBl,h)) and O(HN dh + LHBl,hdh), while that
+                                                                                 of LAVa is O(HN (N dh + wdh + dh + logBl)
+                                                                                 and O(HN dh + LHBl,hdh + LHBl,hdh). Setting
+Figure 4: Ablation study on LongBench.                Figure 5: LaVa score vs AdaKV score on LongBench.
+
+context length N as 10,000, head budget Bl,h as       While most approaches assume a uniform budget,
+1024, the extra computation of LAVa compared to       recent efforts have been made for dynamic bud-
+SnapKV is 0.01% and the extra memory usage is         get allocation across layers (Qin et al., 2025) and
+0.6%, which is consistent with Figure 3.              heads (Feng et al., 2024). Some methods aim at
+                                                      layer-dependent budgets but fix the patterns across
+5.4 Further Analysis                                  all samples (Cai et al., 2024; Yang et al., 2024). In
+                                                      general, KV Cache eviction and budget allocation
+Dynamic Budget Allocation To examine the im-          are typically treated as separate problems, requir-
+pact of dynamic budget allocation, we introduce       ing a combination of independent strategies. In
+two modifications: LAVa (-layer dynamic), which       contrast, we develop a principled framework based
+enforces a uniform layer budget of B/L, and LAVa      on information loss in the residual stream and pro-
+(-head dynamic), which fixes the head budget at       pose a unified method for both cache compression
+Bl/H after dynamically determining the layer bud-     and dynamic budget allocation.
+get Bl, performing head-wise cache eviction with-
+out cross-head comparisons. Results in Figure 4          Closely related to LAVa is (Feng et al., 2025,
+demonstrate that dynamic budget allocation at both    2024), which aims at minimizing the layer output
+the head and layer levels is essential for perfor-    perturbation. However, this study only applies the
+mance. Furthermore, it reinforces the finding that    derived metric locally for head budget allocation.
+dynamic layer budgets are essential for generation    In contrast, we propose a metric for layer-wise
+tasks, whereas dynamic head budgets play a crucial    cache eviction with dynamic layer budgets.
+role in text extraction tasks. Detailed results are
+provided in Appendix D, where we also analyze the     7 Conclusion
+influence of different layer allocation approaches.
+                                                      This paper provided a comprehensive of current
+Analysis of LAVa Score. To validate the effec-        KV Cache compression into a unified framework,
+tiveness of LAVa score, we replace our dynamic        grounded in the principle of minimizing informa-
+layer budgets with fixed ones with PyramidKV          tion loss in Transformer residual streams. By
+or Uniform allocation. For different total bud-       analyzing the Layer Attention Output Loss, we
+gets, we then compare LAVa-Pyramid with Ada-          proposed LAVa, a novel layer-wise compression
+PyramidKV and LAVa-Uniform with AdaKV on              method that enables fully dynamic head and layer
+LongBench. For each comparison, we count the          budget allocation. Our experiments demonstrate
+number of tasks in LongBench where one method         that dynamic layer budgets are crucial for gener-
+outperforms the other. Figure 5 presents the final    ation tasks, whereas dynamic head budgets are
+winning rates. The results show that our scoring      important for extraction tasks. As a fully dynamic
+function yields a significantly higher number of      compression method, LAVa consistently maintains
+wins in most cases, validating its effectiveness.     top performance across task types and LLM archi-
+                                                      tectures, while achieving the same speedup of 9×
+6 Related Work                                        with 128K context length compared to full cache.
+
+Recently, various KV Cache compression methods           Future directions include exploring new com-
+have been proposed, leveraging different policies     pression algorithms based on our framework, as
+such as recency (Xiao et al., 2024), accumulated      well as extending our framework for model com-
+attention scores (Zhang et al., 2023), last-token     pression. By advancing efficient methods for
+attention scores (Oren et al., 2024), and recent at-  LLMs, our work contributes to making LLM more
+tention scores (Li et al., 2024; Dai et al., 2024).   accessible and scalable for diverse applications.
+Limitations                                             Jincheng Dai, Zhuowei Huang, Haiyun Jiang, Chen
+                                                           Chen, Deng Cai, Wei Bi, and Shuming Shi. 2024.
+There are several limitations to our work. While           Corm: Cache optimization with recent message
+we propose a unified framework with multiple opti-         for large language model inference. Preprint,
+mization opportunities, our theoretical analysis and       arXiv:2404.15949.
+experiments focus on only one direction. Although
+LAVa’s simplicity is a key advantage, other ap-         Tri Dao. 2023. Flashattention-2: Faster attention with
+proaches should be explored to further close the per-      better parallelism and work partitioning. arXiv
+formance gap with a full-cache setup, particularly         preprint arXiv:2307.08691.
+for generation tasks. Additionally, further research
+is needed to better understand why dynamic layer        Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and
+budget is crucial for generation tasks. Lastly, apart      S Kevin Zhou. 2024. Ada-kv: Optimizing kv cache
+from FlashAttention-2 (Dao, 2023), our method              eviction by adaptive budget allocation for efficient
+has not yet been integrated into other widely used         llm inference. arXiv preprint arXiv:2407.11550.
+inference frameworks, such as vLLM (Kwon et al.,
+2023). We believe that such integration is essential    Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and
+for broader adoption and real-world deployment of          S Kevin Zhou. 2025. Identify critical kv cache in
+our algorithm.                                             llm inference from an output perturbation perspec-
+                                                           tive. Preprint, arXiv:2502.03805.
+References
+                                                        Javier Ferrando and Elena Voita. 2024. Information flow
+Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury     routes: Automatically interpreting language models
+   Zemlyanskiy, Federico Lebron, and Sumit Sanghai.        at scale. In Proceedings of the 2024 Conference on
+   2023. GQA: Training generalized multi-query trans-      Empirical Methods in Natural Language Processing,
+   former models from multi-head checkpoints. In The       pages 17432–17445, Miami, Florida, USA. Associa-
+   2023 Conference on Empirical Methods in Natural         tion for Computational Linguistics.
+   Language Processing.
+                                                        Yao Fu, Rameswar Panda, Xinyao Niu, Xiang Yue, Han-
+Anthropic and et al. The claude 3 model family: Opus,      naneh Hajishirzi, Yoon Kim, and Hao Peng. 2024.
+   sonnet, haiku.                                          Data engineering for scaling language models to
+                                                           128k context. In Proceedings of the 41st Interna-
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu,            tional Conference on Machine Learning, ICML’24.
+   Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao         JMLR.org.
+   Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang,
+   and Juanzi Li. 2024. LongBench: A bilingual, multi-  Daya Guo, Canwen Xu, Nan Duan, Jian Yin, and Ju-
+   task benchmark for long context understanding. In       lian McAuley. 2023. Longcoder: A long-range pre-
+   Proceedings of the 62nd Annual Meeting of the As-       trained language model for code completion. In In-
+   sociation for Computational Linguistics (Volume 1:      ternational Conference on Machine Learning.
+   Long Papers), pages 3119–3137, Bangkok, Thailand.
+   Association for Computational Linguistics.           Zhiyu Guo, Hidetaka Kamigaito, and Taro Watanabe.
+                                                           2024. Attention score is not all you need for token im-
+Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Tianyu     portance indicator in KV cache reduction: Value also
+   Liu, Keming Lu, Wayne Xiong, Yue Dong, Baobao           matters. In Proceedings of the 2024 Conference on
+   Chang, Junjie Hu, et al. 2024. Pyramidkv: Dynamic       Empirical Methods in Natural Language Processing,
+   kv cache compression based on pyramidal informa-        pages 21158–21166, Miami, Florida, USA. Associa-
+   tion funneling. arXiv preprint arXiv:2406.02069.        tion for Computational Linguistics.
+
+Guanzheng Chen, Xin Li, Michael Shieh, and Lidong       Roger A Horn and Charles R Johnson. 2012. Matrix
+   Bing. 2025. LongPO: Long context self-evolution of      analysis. Cambridge university press.
+   large language models through short-to-long prefer-
+   ence optimization. In The Thirteenth International   Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-
+   Conference on Learning Representations.                 tanu Acharya, Dima Rekesh, Fei Jia, and Boris Gins-
+                                                           burg. 2024. RULER: What’s the real context size of
+Wei-Lin Chiang, Zhuohan Li, Zi Lin, Ying Sheng,            your long-context language models? In First Confer-
+   Zhanghao Wu, Hao Zhang, Lianmin Zheng, Siyuan           ence on Language Modeling.
+   Zhuang, Yonghao Zhuang, Joseph E. Gonzalez, Ion
+   Stoica, and Eric P. Xing. 2023. Vicuna: An open-     Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan
+   source chatbot impressing gpt-4 with 90%* chatgpt       Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang,
+   quality.                                                and Weizhu Chen. 2021. Lora: Low-rank adap-
+                                                           tation of large language models. arXiv preprint
+                                                           arXiv:2106.09685.
+
+                                                        Albert Q. Jiang, Alexandre Sablayrolles, Arthur Men-
+                                                           sch, Chris Bamford, Devendra Singh Chaplot, Diego
+                                                           de las Casas, Florian Bressand, Gianna Lengyel, Guil-
+                                                           laume Lample, Lucile Saulnier, Lélio Renard Lavaud,
+   Marie-Anne Lachaux, Pierre Stock, Teven Le Scao,        Wenhao Wu, Yizhong Wang, Guangxuan Xiao, Hao
+   Thibaut Lavril, Thomas Wang, Timothée Lacroix,             Peng, and Yao Fu. 2025. Retrieval head mechanis-
+   and William El Sayed. 2023. Mistral 7b. Preprint,          tically explains long-context factuality. In The Thir-
+   arXiv:2310.06825.                                          teenth International Conference on Learning Repre-
+                                                              sentations.
+Ehsan Kamalloo, Nouha Dziri, Charles Clarke, and
+   Davood Rafiei. 2023. Evaluating open-domain ques-       Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, junxian
+   tion answering in the era of large language models.        guo, Shang Yang, Haotian Tang, Yao Fu, and Song
+   In Proceedings of the 61st Annual Meeting of the           Han. 2025. Duoattention: Efficient long-context
+   Association for Computational Linguistics (Volume          LLM inference with retrieval and streaming heads. In
+   1: Long Papers), pages 5591–5606, Toronto, Canada.         The Thirteenth International Conference on Learning
+   Association for Computational Linguistics.                 Representations.
+
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying               Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song
+   Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-             Han, and Mike Lewis. 2024. Efficient streaming lan-
+   zalez, Hao Zhang, and Ion Stoica. 2023. Efficient          guage models with attention sinks. In The Twelfth
+   memory management for large language model serv-           International Conference on Learning Representa-
+   ing with pagedattention. In Proceedings of the 29th        tions.
+   Symposium on Operating Systems Principles, SOSP
+   ’23, page 611–626, New York, NY, USA. Association       Dongjie Yang, Xiaodong Han, Yan Gao, Yao Hu, Shilin
+   for Computing Machinery.                                   Zhang, and Hai Zhao. 2024. PyramidInfer: Pyramid
+                                                              KV cache compression for high-throughput LLM
+Yuhong Li, Yingbing Huang, Bowen Yang, Bharat                 inference. In Findings of the Association for Com-
+   Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai,         putational Linguistics: ACL 2024, pages 3258–3270,
+   Patrick Lewis, and Deming Chen. 2024. SnapKV:              Bangkok, Thailand. Association for Computational
+   LLM knows what you are looking for before gener-           Linguistics.
+   ation. In The Thirty-eighth Annual Conference on
+   Neural Information Processing Systems.                  Xinrong Zhang, Yingfa Chen, Shengding Hu, Zihang
+                                                              Xu, Junhao Chen, Moo Hao, Xu Han, Zhen Thai,
+Nelson F. Liu, Kevin Lin, John Hewitt, Ashwin Paran-          Shuo Wang, Zhiyuan Liu, and Maosong Sun. 2024.
+   jape, Michele Bevilacqua, Fabio Petroni, and Percy         ∞Bench: Extending long context evaluation beyond
+   Liang. 2024. Lost in the middle: How language mod-         100K tokens. In Proceedings of the 62nd Annual
+   els use long contexts. Transactions of the Association     Meeting of the Association for Computational Lin-
+   for Computational Linguistics, 12:157–173.                 guistics (Volume 1: Long Papers), pages 15262–
+                                                              15277, Bangkok, Thailand. Association for Compu-
+OpenAI and et al. 2024. Gpt-4 technical report.               tational Linguistics.
+   Preprint, arXiv:2303.08774.
+                                                           Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong
+Matanel Oren, Michael Hassid, Nir Yarden, Yossi Adi,          Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-
+   and Roy Schwartz. 2024. Transformers are multi-            dong Tian, Christopher Ré, Clark Barrett, et al. 2023.
+   state rnns. arXiv preprint arXiv:2401.06104.               H2o: Heavy-hitter oracle for efficient generative in-
+                                                              ference of large language models. Advances in Neu-
+Guanghui Qin, Corby Rosset, Ethan Chau, Nikhil Rao,           ral Information Processing Systems, pages 34661–
+   and Benjamin Van Durme. 2024a. Dodo: Dynamic               34710.
+   contextual compression for decoder-only lms. In
+   Proceedings of the 62nd Annual Meeting of the As-       A Extension of The Information Flow of
+   sociation for Computational Linguistics (Volume 1:           LLM Decoding Process with KV Cache
+   Long Papers), pages 9961–9975.
+                                                           KV Cache is initialized at prefilling stage, which
+Guanghui Qin, Corby Rosset, Ethan C. Chau, Nikhil          basically computes the Key and Value for tokens
+   Rao, and Benjamin Van Durme. 2024b. Nugget 2d:          in the initial prompts in the standard way (Vaswani,
+   Dynamic contextual compression for scaling decoder-     2017). In the following, we assume that there ex-
+   only language models.                                   ists a KV Cache of (N − 1) previous tokens and
+                                                           demonstrate how decoding is performed at step-N .
+Ziran Qin, Yuchen Cao, Mingbao Lin, Wen Hu, Shixuan
+   Fan, Ke Cheng, Weiyao Lin, and Jianguo Li. 2025.        Notation Table The LLM has L layers, each has
+   CAKE: Cascading and adaptive KV cache eviction          H heads. The model and head dimensions are d
+   with layer preferences. In The Thirteenth Interna-      and dh = d/H; Kl, Vl are the KV Cache for the l-
+   tional Conference on Learning Representations.          th layer up to the current time step (the N -th token),
+                                                           which are of [H, (N − 1), dh] sizes. The notations
+Qwen and et al. 2025. Qwen2.5 technical report.            for the theoretical analysis are listed in Table 3.
+   Preprint, arXiv:2412.15115.
+
+A Vaswani. 2017. Attention is all you need. Advances
+   in Neural Information Processing Systems.
+Notation                     Explanation                 Notation                                Explanation
+
+    N                   Current token length              ANl,h[i]   Attention weight of position i at layer l, head h and step N
+                       Expected token length                ylN                   Attention output of layer l and step N
+   Ne                  Total number of layers               yˆlN
+    L            Total number of heads per layer             p      Modified attention output of layer l and step N after eviction
+    H                   Layer index, l ∈ [L]                 pˆ                    Logits after last layer for next token
+     l                  Head index, h ∈ [H]                  P
+    h           The model embedding dimension                w       Modified logits after last layer for next token after eviction
+    d     The head embedding dimension dh = d/H             Bl,h      Information loss function of Transformer residual streams
+    dh    The input hidden states of step N and layer l      Bl
+   xlN       The query vector of step N and layer l                                          Sliding window size
+   QlN         The key vector of step N and layer l          B                          Budget for head h of layer l
+   KlN       The value vector of step N and layer l
+   VlN           Key cache of layer l and head h           sl,h[i]                            Budget for layer l
+  Kl,h          Value cache of layer l and head h            el            Fixed total budget for KV Cache, B = l∈[L] Bl
+   Vl,h                                                     Il,h
+                                                             I                   Score of position i at layer l and head h
+                                                                    The uncertainty of layer l for dynamic layer budget allocation
+
+                                                                        Attention mask for the head h of layer l, Il,h ∈ [1, 0]N
+                                                                                     Attention mask I ∈ [1, 0]L×H×N
+
+                                               Table 3: Notation table.
+
+Decoding Process According to (Ferrando and                              pN = yLN + F F N (yLN W M               (8)
+Voita, 2024), the decoding process of large lan-
+guage models (LLMs) can be viewed as a series                       Head-wise vs Layer-wise Cache Current query
+of operations on the current residual stream, as il-                matrix and KV Cache on head h of layer l are :
+lustrated in Figure 1. In each layer, information is
+read from the residual stream, updated, and then                    QlN,h = QNl [:, dh ∗ h : dh ∗ (h + 1)] ∈ R1×dh (9)
+written back. Specifically, supposing that xNl is
+the current input for layer l, we first calculate the               Kl,h = Kl[:, dh ∗ h : dh ∗ (h + 1)],  (10)
+corresponding QlN , KlN , VlN as follows:
+                                                                    Vl,h = Vl[:, dh ∗ h : dh ∗ (h + 1)] ∈ RN×dh
+ QNl = xNl WlQ; KlN = xlN WlK ; VlN = xlN WlV
+                                                                                                          (11)
+where QNl , KlN , VlN are of size (H × 1 × dh), con-
+taining H head-wise caches. The layer-wise KV                       Henc, the layer-wise KV Cache can be treated as
+Cache is then updated as follows:                                   concatenation of head-wise elements where we just
+                                                                    change the order of dimensions:
+       Kl = Cat[Kl, KlN ], Vl = Cat[Vl, VlN ]
+                                                                    Kl = Cath∈[H][Kl,h] ∈ RH×N×dh ,       (12)
+
+where Kl, Vl are tensors of size (H × N × dh), and                  Vl = Cath∈[H][Vl,h] ∈ RH×N×dh         (13)
+Cat indicates the concatenation operation.We then
+calculate the attention scores of step-N for layer-l:               And the same to the query matrix:
+
+             ANl = Cath∈[H] AlN,h                                   QNl = Cath∈[H][QNl,h] ∈ RH×1×dh       (14)
+
+where AlN,h  =  S  of  tmax(  QNl√,h Kl,h  ).            Here,      B Extension of A Principled Framework
+                                   dh                                    for KV Cache Eviction based on
+textbfAlN,h[i] indicates how much the token at step-                     Information Loss
+
+N (the N -th token) attends to the i-th token (i <=
+
+N ). Layer-l attention output is calculated as fol-                 The unified problem for budget allocation and
+                                                                    cache eviction can be defined as follows:
+lows:
+
+       ylN = Cath∈[H](ANl,hVl,h)WlO ∈ R1×d                          min  P  (x11...N  ,  I  ,  B)         (15)
+
+                                                                    I,B
+
+where WlO ∈ Rd×d. The layer output xlN+1, which                     st. Il,h[i] = Bl,h;
+is also the input for the layer-(l + 1), is calculated
+as xlN+1 = ylN + F F N (ylN ).                                          i∈[N ]
+
+   In the last layer, we exploits an un-embedding                           Bl,h = Bl; Bl = B
+layer (W M ∈ Rd×|V|) to get the probability vector
+                                                                    h∈[H ]                  l∈[L]
+p for next token sampling:
+                                                                    Il,h[k] = 1 , ∀l, h; and ∀k ∈ [N − w, N ]
+The optimization problem in Eq. 15 is infeasible to     only utilizes tokens within sliding window to cal-
+solve for several reasons. We can instead search for    culate accumulated attention scores. We set sliding
+a scoring function s, where sl,h[i] assigns an impor-   window size as w:
+tance score to token i at layer l and head h. This
+scoring function allows us to greedily choose the                                     N
+least important entries to be masked until the bud-
+get is met I = Select(s, B). Bringing everything                        sl,h[i] =          Alj,h[i]
+together, we arrive at the following (surrogate) op-
+timization problem:                                                                j=N −w
+
+                                                                        Il,h = Select(sl,h, Bl,h)          (20)
+
+              min     P  (x11...N  ,  s,  B)  (16)      SnapKV claims that the accumulated attention
+                                                        scores of the recent sliding window is enough to
+              B,s∈F                                     represent the significance of tokens. Furthermore,
+                                                        SnapKV adopts pooling operation to preserve the
+   Current various kv cache eviction methods can        completeness of the information. In our view, bet-
+be adapted into our framework, just defining sev-       ter protecting the coherence of the text is the reason
+eral significant functions and parameters (includ-      for the effectiveness of pooling operation.
+ing P, I, B and s) and introducing additional con-
+straints, which will result in suboptimal perfor-       PyramidKV. (Cai et al., 2024) The difference
+mance. In addition, they adopt many heuristic           between PyramidKV and SnapKV is that consider-
+techniques based on observations to simplify the        ing the different significance of layers in the long-
+problem. The full summarization of how existeing        context setting, PyramidKV set the budgets of lay-
+methods can be formalized within our framework          ers in a descending order like a pyramid. It uses a
+is presented in Table 4.                                hyper-parameter β to control the shape of pyramid.
+
+H2O. (Zhang et al., 2023) Allocation budgets B                              B              2∗B
+are all fixed before generation. The budgets of all              BL−1 = β ∗ L , B0 = L − BL−1
+layers are the same and the budgets of all heads are
+also the same.                                                                        BL−1 − B0
+                                                                                         L−1
+                         B                                              Bl  =  B0  −                 ∗  l  (21)
+                      Bl,h = HL               (17)
+
+H2O uses head attention loss and adopt accumu-          And the budgets of heads in one layer are the same:
+lated attention scores as score function.
+                                                        Bl,h  =  Bl  .
+                                                                 H
+
+           N                                            Hence, compared with SnapKV, PyramidKV
+
+sl,h[i] =         Ajl,h[i], Il,h = Select(sl,h, Bl,h)   consider about different budgets of layers in a
+
+           j=i+1                                        heuristic way.
+
+                                              (18)
+
+H2O claimed that the accumulated attention score        CAKE. (Qin et al., 2025) Allocation budgets B
+                                                        are generated through the online prefilling stage.
+can preserve the future attention pattern better. This  All heads of one layer have the same budget. So
+                                                        CAKE do not consider the level of head (such as
+technique is heuristic and based on observations        using mean information across heads).
+
+of experiments in several methods like H2O and             Considering spatial and temporal information,
+                                                        CAKE allocates different budgets to different lay-
+SnapKV (Li et al., 2024), but it is valid and actually  ers. And not adopting the fixed pattern like Pyra-
+                                                        midKV, CAKE claims that for different samples,
+can improve the performance, mitigating the im-         the allocation pattern also needs to be adapted. It
+                                                        defines functions of spatial and temporal informa-
+pact of absolutism of only current attention scores     tion for one layer l, the spatial information function
+                                                        H is formed as entropy of attention scores (larger
+(Oren et al., 2024).                                    values means more even distribution) and the tem-
+                                                        poral information function V (larger values means
+TOVA. (Oren et al., 2024) The difference be-            more distribution shift) is formed as variance of
+tween TOVA and H2O is that TOVA uses current            attention scores (A(n) means the attention scores
+attention scores as score function.
+
+sl,h[i] = AlN,h[i], Il,h = Select(sl,h, Bl,h) (19)
+
+SnapKV. (Li et al., 2024) The difference between
+SnapKV and H2O is that SnapKV uses recent atten-
+tion scores as score function, which means SnapKV
+Methods                               Budgets              Scoring Function                                        Loss
+
+H2O (Zhang et al., 2023)           Bl,h          Bl        Accumulated attention scores                            Head Attention
+SnapKV (Li et al., 2024)          Bl/H          B/L
+TOVA (Oren et al., 2024)                                                                                           Head Attention
+CAKE (Qin et al., 2025)                                    sl,h[i] =      N      Ajl,h[i]                          Output
+                                                                          j=i+1                                    Logits
+VATP (Guo et al., 2024)                                                                                            Layer Attention
+                                  Bl/H          B/L        Recent attention scores                                 Output
+Dodo (Qin et al., 2024a)
+DuoAttention (Xiao et al., 2025)                           sl,h[i]  =  1    N          Alj,h[i],  ∀i  <  N  −w
+AdaKV (Feng et al., 2024)                                              w    j=N −w
+LAVa (Ours)
+                                  Bl/H          B/L        Last-token attention scores
+
+                                                           sl,h[i] = AlN,h[i]
+
+                                  Bl/H Dynamic             Recent attention scores + attention shifts
+
+                                                           sl,h[i] = γVARjN=N−w([Ajl,h[i]))
+
+                                                           +  1     N       Ajl,h[i],  ∀i  <  N   −   w
+                                                              w     j=N −w
+
+                                  Bl/H          B/L        Recent attention scores + value vectors
+
+                                                           sl,h[i]  =  ∥Vl,h [i]∥1  N      −w  Ajl,h[i]
+                                                                             w      j=N
+
+                                  Dynamic      B/L         Neural Network (LoRA)
+
+                                  w or full       -        Head classifier (retrieval vs non-retrieval)
+                                  Dynamic      Fixed
+                                  Dynamic    Dynamic       Recent attention scores
+
+                                                           Recent attention scores + value vectors
+
+                                                           sl,h[i]  =  maxk ∥Vl,h[k]∥1     N             Alj,h[i]
+                                                                                  w        j=N −w
+
+Table 4: Comparison between different methods; Dodo and DuoAttention require training; The layer cache budget
+Bl of AdaKV is based on the method it is integrated with.
+
+distribution in the n-th step of prefilling stage):              layer attention output loss function but not con-
+
+                          N                                      duct real training. Deriving the upper bound of
+                                                                 output loss (as shown in Eq. 25 where C =
+           Hl = − Alj log(Ajl ),                                 maxh∈[H]∥WlO,hT VlT,h∥1), AdaKV obtains the in-
+                                                                 sight that allocating different budgets to heads of
+                         j=1
+                                                                 one layer based on the score function just consider-
+                   N
+                                                                 ing about information within attention scores can
+           Vl = VAR([Alt[j]]t∈[j,N])                 (22)
+                                                                 preserve the performance of model further.
+                j=1
+
+Then CAKE uses these two functions to determine                  ∥yl − yˆl∥1≤ 2C                  ( AlN,h[i](1 − Il,h[i]))
+the budget of layers, where γ1 and γ2 are two hyper-
+parameters to control the influence of two func-                                           h∈[H] i∈[N ]
+tions:
+                                                                                                                   (25)
+
+                   11                                            We set sˆl as the topk results of all sl,h, h ∈ [H], the
+
+Pl = Hlγ1 Vlγ2 , Bl =       Pl        B,  Bl,h  =  Bl            budget of one head h can be calculated by:
+                                                   H
+                           l∈[L]  Pl
+
+                                                     (23)          Bl,h = N um(sˆl,h), sˆl, Il = Select(sl,h, Bl,h)
+                                                                                                                        (26)
+CAKE also uses head attention loss function as
+                                                                 AdaKV combines this insight with SnapKV and
+optimization objective but it also introduces tempo-             PyramidKV for better results. So the score func-
+                                                                 tion of AdaKV is the same as Eq. 20. However, the
+ral information into score function of SnapKV. It                bound of AdaKV ignores the influence of value in-
+                                                                 formation and just use the max information, which
+adopts variance to represent the distribution shift              will make the bound too loose. Our framework
+                                                                 about output loss is motivated by this research and
+of attention scores for the same token. Let γ be a               we conduct some modification and further studies.
+                                                                 For the details and how to derive upper bound of
+hyper-parameter to control the influence of tempo-               output loss, refer to Section 4.
+
+ral information, and w as the sliding window size,               DuoAttention. (Xiao et al., 2025) DuoAttention
+                                                                 uses layer attention output loss function as op-
+CaKE score is:                                                   timization objective. Unlike H2O and TOVA, at-
+                                                                 tention mask I of DuoAttention is constraint to
+           N
+
+sl,h[i] =          Ajl,h[i] + γVAR([Alt,h[i]]t∈[i,N])
+
+           j=N −w
+
+Il,h = Select(sl,h, Bl,h)                            (24)
+
+AdaKV. (Feng et al., 2024) The algorithm of
+AdaKV is based on other methods. It adopts
+a pattern combined with sink and recent tokens               Budgets          128 256 512 1024
+based on allocation budgets B, which means score
+function s id for tokens are not needed. Here sink           SnapKV           34.42  38.49  41.48  43.00
+tokens means several initial tokens in prompt de-             +VATP           35.34  39.41  41.93  43.32
+fined by StreamingLLM (Xiao et al., 2024).                                    36.74  40.12  42.59  43.65
+                                                             LAVa             36.20  39.77  42.11  43.35
+                                                              -layer dynamic
+
+             1 if position k is sink or recent, k ∈ [N ]     Table 5: Comparison between VATP and LAVa.
+Il,h[i] = 0 otherwise, evict Kl,h[k] and Vl,h[k]
+
+                                                       (27)
+
+DuoAttention adopts real optimization method and             dynamic. The deeper difference, however, lies in
+needs training based on 2-norm of output loss func-          how the two scores are developed. VATP comes
+tion. The optimization result is to determine the            with an intuition of "Value also matters" but lacks
+allocation budgets B. In detail, it determines which         theoretical analysis. We independently derive from
+head was allocated with full budget and which head           layer attention output with a complete reasoning
+was allocated with a compressed budget. So be-               process: starting from layer attention output, de-
+sides I and B, DuoAttention introduces a param-              riving the upper bound, getting an approximate
+eter α to be optimized and finally determines the            score in greedy solution, smoothing it out based on
+different functions of heads, including Retrieval            multiple residual stream.
+Heads (Wu et al., 2025) and Streaming Heads. We
+define wˆ as the numbers of sink and recent tokens.             This reasoning is very important. As we start
+                                                             from the layer point of view, we can see that such
+
+           n if head h of layer l is Retrieval Head          scores can be used to compare entries across heads
+Bl,h = wˆ otherwise, Streaming Head                          for layer-wise KV Cache eviction. And we ar-
+                                                             gue that doing so could reduce the information
+                                                       (28)  loss at layer attention output. The reasoning pro-
+
+Dodo. (Qin et al., 2024a) Dodo uses logit loss cess shows what approximation we make and gives
+
+function as optimization objective. But not adopt- room for future improvement.
+
+ing a predefined rule for attention mask I, Dodo                To validate our elaboration, we compares three
+uses a score function ϕ implemented by LoRA (Hu              configurations: (1) VATP integrated with SnapKV,
+et al., 2021) adapters to determine the attention            (2) standard LAVa, and (3) LAVa without dynamic
+mask for tokens, which is trained along with log-            layer budgeting based on Mistral-7B-Instruct-v0.2
+its loss. Logits loss is defined by loss of future           in LongBench. The results in Table 5 demonstrate
+expected tokens which are not pratical. So Dodo              that while VATP shows improvement over baseline
+converts the expected tokens into past tokens and            SnapKV, it consistently underperforms compared
+the loss function can be formalized as:                      to both LAVa and LAVa (-layer dynamic). From
+
+P (I, B) = CE(p, pˆ)i               the computational perspective, VATP incurs similar
+                           (29) overhead to LAVa(refer to Appendix D, yet delivers
+                   i∈[N ]
+                                    suboptimal performance. This verifies our claim
+
+The score function ϕ is trained via this loss func- that intuition and a theoretical analysis help you
+tion and finally determines which tokens will be get to a more optimal solution.
+
+preserved. The cache budget B for all heads and
+
+layers are the same. Besides, Dodo merges the in- C Extension of LAVa: Layer-wise Cache
+
+formation within tokens evicted into the preserved           Eviction with Dynamic Budget
+
+tokens similar to KV Cache merging methods.                  Allocation
+
+VATP. (Guo et al., 2024) The difference between              Details of Lemma 1. We define and derive the
+LAVa and VATP is shown in Table 4 and explained              Layer Attention Output Loss in this lemma.
+as follows: (1) VATP directly multiplies each to-
+ken’s value norm with attention scores. In contrast,         Lemma 1. Based on the Lp norm, the layer at-
+LAVa calculates the maximum value norm, which                tention output loss due to the attention mask I is
+serves as scaling factors for heads; (2) VATP has            measured for layer-l at the current (N -th) decoding
+fixed head and layer budgets, while LAVa is totally
+step as follows:                                                    This lemma is derived from Horn and Johnson
+                                                                 (2012). Then we can obtain (Temporarily ignoring
+P(x11...N , I, B) = ∥ylN − yˆlN ∥p                       (30)    the superscript N ):
+
+=       C ath   (ANl,h  −    AlN,h  ⊙ Il,h    )Vl,h  WlO
+                           ∥AlN,h   ⊙ Il,h∥1
+                                                              p
+
+where ⊙ indicates element-wise multiplication and                ∥yl − yˆl∥1
+yˆlN = Cath(AˆlN,hVl,h)WlO
+As we mentioned above:                                           ≤  ∥C  ath  [(Al,h  −    Al,h ⊙ Il,h      )Vl,h]∥1∥WlO          T  ∥1
+                                                                                        ∥Al,h ⊙ Il,h∥1
+           ylN = Cath∈[H](ANl,hVl,h)WlO
+           yˆlN = Cath∈[H (AˆlN,hVl,h)WlO                                                                                        (36)
+
+                                                      (31)
+
+And based on the definition of attention mask I, the             We set ∥WlOT ∥1 as Cˆ because it is the constant
+attention weights after eviction can be calculated               model parameter. Then we know that and set:
+as:
+
+AˆlN,h  =               −  inf  ⊙(1  −√Il,h)  +  QNl,hKlT,h  )
+           Sof tmax(                     dh
+
+                                                        (32)        Gl,h   =  (Al,h  −     Al,h ⊙ Il,h          )Vl,h  ∈  R1×dh
+                                                                                         ∥Al,h ⊙ Il,h∥1
+Hence, Lemma 31 is equal to (Temporarily ignor-
+
+ing the superscript N ):                                                                                                         (37)
+
+                             Al,h ⊙ Il,h                         Thus ∥Cath∈[H][Gl,h]∥1 is the vector 1-norm of a
+                           ∥Al,h ⊙ Il,h∥1
+                Aˆl,h   =                               (33)     vector ∈ R1×(dh∗H). According to the definition of
+
+                                                                 vector 1-norm, we can transform cat operation to
+
+This theorem has been proved by AdaKV (Feng                      sum and continue derivation based on Theorem 2:
+et al., 2024), so we will not elaborate further here.
+
+Proof of Theorem 1. Then we drive the upper                         ∥yl − yˆl∥1
+bound of Layer Attention Output Loss and give
+this theorem.
+
+Theorem 1. The L1 norm of layer attention out-                      ≤  Cˆ ∥C ath∈[H ] [(Al,h     −    Al,h ⊙ Il,h         )Vl,h  ]∥1
+put loss can be bounded by:                                                                         ∥Al,h ⊙ Il,h∥1
+
+∥yl − yˆl∥1                                             (34)                                     Al,h ⊙ Il,h
+                                                                                               ∥Al,h ⊙ Il,h∥1
+        h∈[H ]          k∈[N ]                                      =  Cˆ        ∥(Al,h  −                      )Vl,h     ∥1
+
+≤ 2Cˆ           V¯l,h(          ANl,h[k](1 − Il,h[k]))                     h∈[H ]
+
+where V¯l,h = maxk∈[N]∥Vl,h[k]∥1 and Cˆ =                           ≤  Cˆ        (∥Al,h  −       Al,h ⊙ Il,h    ∥1∥VlT,h∥1       )
+∥WlOT ∥1 is a constant, which is independent of                                                ∥Al,h ⊙ Il,h∥1
+any head or token within layer-l.                                          h∈[H ]
+
+Proof. First we need to introduce a lemma:                                                                                       (38)
+
+Lemma 2. Given a vector x ∈ R1×m and a matrix                                                                    ∥ = Al,h⊙Il,h
+W ∈ Rm×n, we can get the relationship between
+matrix norm and vector norm:                                                                                    ∥Al,h⊙Il,h∥1 1
+
+                ∥xW ∥p≤ ∥x∥p∥W T ∥p                              Next   we    will   prove   that   ∥Al,h  −
+
+                                                        (35)     2     i∈[N ]        Al,h[i].
+                                                                       if Il,h[i]=0
+∥xW ∥p and ∥x∥p are vector p-norm, ∥W T ∥p is
+matrix p-norm which is calculated by the largest                    Let ∥Al,h ⊙ Il,h∥1= i∈[N] Il,h[i]Al,h[i] =
+sum of column absolute value.
+                                                                    i∈[N ]   [i]=1  Al,h[i]  as  F  ∈  (0, 1]:
+                                                                    if Il,h
+∥Al,h  −     Al,h    ⊙ Il,h    ∥1  =    F  − Il,h  ⊙      Al,h∥1  Another potential avenue is formulating the prob-
+           ∥Al,h     ⊙ Il,h∥1          ∥    F                     lem as an online reinforcement learning (RL) task,
+                                                                  where the objective is to optimize the policy (i.e.,
+=       (F       −  Il,h[i])Al,h[i] |                             the scoring function) to maximize the expected re-
+       |                                                          ward. Here, the expected reward can be cast as min-
+                     F                                            imizing the expected loss in future residual streams,
+   i∈[N ]                                                         not just the past ones. This direction is potential for
+                                                                  the cache-offload and retrieval problem, where we
+    i∈[N ]                     i∈[N ]      (1 − F )Al,h[i]        need to decide which parts of the cache to offload
+                                                  F               to CPU or retrieve from CPU while maintaining
+=                Al,h[i] +                                        the communication cost.
+
+   if Il,h[i]=0              if Il,h[i]=1                            Additionally, this framework could be extended
+                                                                  to model pruning, not just masking tokens but also
+    i∈[N ]                     i∈[N ]        Al,h[i]              selectively masking model parameters to minimize
+                               if Il,h[i]=1                       information flow while preserving efficiency. Also,
+=                Al,h[i] +                                        the value of algorithms like LAVa and SnapKV,
+                                       F                          CAKE lies in their potential to serve as compo-
+   if Il,h[i]=0                                                   nents of larger solutions tailored for long output
+                                                                  and multi-turn contexts. These static methods can
+    i∈[N ]                                                        be integrated with merging techniques , cache re-
+                                                                  trieval and offloading, quantization methods, or
+−                Al,h[i]                                          dynamic approaches. This is also a promising di-
+                                                                  rection for our future work.
+   if Il,h[i]=1
+                                                                  D Extension of Experiments
+    i∈[N ]                         i∈[N ]
+                                                                  Implementation Details. For SnapKV and Ada-
+=                Al,h[i] + 1 −                   Al,h[i]          SnapKV, no additional hyperparameters are re-
+                                                                  quired. However, for PyramidKV, we must adjust
+   if Il,h[i]=0                    if Il,h[i]=1                   the parameter β to control the shape of the cache
+                                                                  budget pyramid. We set β to (5, 10, 20) and select
+       i∈[N ]                                                     the best-performing result, the same approach to
+                                                                  Ada-PyramidKV. For CAKE, three parameters re-
+=2                  Al,h[i]                                       quire tuning: γ1 and γ2 for layer budget allocation,
+                                                                  and γ3 for the scoring function, as explained in Ap-
+    if Il,h[i]=0                                                  pendix B. Based on recommendations from (Qin
+                                                                  et al., 2025), we set 1/γ1 to (0.2, 0.3, 0.5, 1, 2),
+                                                          (39)    1/γ2 to (0.2, 0.3, 0.5, 1, 2), and γ3 to (0, 5, 10, 200).
+                                                                  We then evaluate different combinations and select
+Then based on the definition of matrix 1-norm                     the one that yields the best overall performance.
+and ∥VlT,h∥1∈ Rdh×N , we can calculate this as the
+largest sum of row absolute value of Vl,h ∈ RN×dh,                   Pooling operators, such as max pooling or aver-
+which is equals to the largest vector 1-norm of V                 age pooling, can be applied to token score vectors
+                                                                  to smooth score variations across adjacent tokens
+value of previous tokens, formalized as:                          (Li et al., 2024; Cai et al., 2024; Qin et al., 2025).
+                                                                  This strategy is also employed in the implemen-
+    V¯l,h = ∥VlT,h∥1= maxk∈[N]∥Vl,h[k]∥1 (40)                     tation of LAVa and all the baselines. For pooling
+                                                                  operation, for all methods, we adopt maxpool func-
+Now we can obtain:                                                tion and set kernel size as 7.
+
+   ∥yl − yˆl∥1                                            (41)    Results of LAVa in LongBench. The results of
+                                                                  Qwen2.5-7B-Instruct are listed in Table 6. The re-
+                     i∈[N ]                                       sults of Qwen2.5-14B-Instruct and Qwen2.5-32B-
+                                                                  Instruct are in Table 7. The results of Llama3-8B-
+   ≤ 2Cˆ (                     ANl,h[i]∥VlT,h∥1)
+
+           h∈[H] if Il,h[i]=0
+
+   = 2Cˆ          (       AlN,h[i]V¯l,h(1 − Il,h[i]))
+
+           h∈[H] i∈[N ]
+
+Here the proof is done.
+
+Potential Future Work. Building on our frame-
+work, multiple research directions can be further
+explored. One possible question is whether the
+Layer Output Loss, which takes into account the
+FFN layer, should be considered. The interaction
+between the FFN layer and the layer attention out-
+put determines what information a layer writes to
+the residual stream (Ferrando and Voita, 2024). In
+other words, certain tokens in past residual streams
+may play a crucial role in activating the layer’s
+knowledge within the FFN. Accounting for these
+interactions could reduce performance loss, yet the
+challenge lies in how to do so efficiently.
+Instruct are in Table 8. From all these results, we     Analysis of Time Complexity. Our study builds
+can obtain the similar conclusion like Mistral in       upon the SnapKV framework with a batch size of 1,
+main text. LAVa outperforms all baselines across        consistent with prior works like CAKE and AdaKV.
+different budgets, even in models with larger pa-       We start with the analysis for SnapKV (the most
+rameter size.                                           computationally efficient method among baselines)
+                                                        in computation for one layer as a reference.
+Results of LAVa in Needle In A Haystack. The
+results of Needle In A Haystack are shown in Ta-           • For layer l, SnapKV needs to calculate the
+ble 9. The conclusion is consistent with that of              layer’s original KV Cache with the time com-
+LongBench. Our method shows superior overall                  plexity of O(HN 2dh), ignoring the IO opera-
+performance, demonstrating its robust in preserv-             tions. Generally, this is done with FlashAtten-
+ing the model’s retrieval capacity.                           tion, which avoids saving the large attention
+                                                              matrix of size O(N 2). The computation cost
+Results of LAVa in Ruler and InfiniteBench.                   in practice is high due to IO operations and
+The results of Ruler and InfiniteBench are shown              recomputation (to avoid saving the attention
+in Table 11 and Table 12. we set the cache budget             matrix), but we ignore it for simplicity.
+as 5%-10% of the task context length, i.e. 1024
+and 10000. We use Mistral-7B-Instruct-v0.2 as              • As Flash attention does not save the attention
+the backbone of Ruler. For InfiniteBench, we                  matrix, for calculating the scores to evict KV
+change the backbone into Mistral-7B-LongPO-                   Cache, SnapKV needs to recompute the atten-
+128K (Chen et al., 2025), which is fine-tuned based           tion scores for the recent window of size w
+on Mistral-7B-Instruct-v0.2, because the task con-            in the second pass. The time complexity is
+text length of InfiniteBench is much longer than the          O(HN wdh).
+original maximum model length 32K. The results
+reconfirm the effectiveness of LAVa.                       • The top-Bl,h selection for head-wise cache
+                                                              eviction with a min-heap takes O(N logBl,h),
+Results of Dynamic Budget Allocation. The de-                 and for H heads, it takes O(HN logBl,h),
+tailed results of ablation study based on Mistral-7B-         where Bl,hH = Bl, BlL = B.
+Instruct-v0.2 in LongBench are listed in Table 10.
+It demonstrates that dynamic budget allocation at       To summarize, SnapKV requires:
+both the head and layer levels is essential for strong
+performance, with a more pronounced performance            • O(HN 2dh) for original cache for one layer;
+drop when head-wise allocation is removed under
+constrained budgets. This is expected, as LAVa’s           • O(HN wdh) for recomputing the recent atten-
+strength lies in its ability to compare cache entries         tion scores;
+across heads.
+                                                           • O(HN logBl,h) for cache eviction.
+Analysis of Different Layer Allocation. To vali-
+date the effectiveness of our layer budget allocation,  In contrast, LAVa requires the computation for one
+we modify LAVa to incorporate two alternative           layer as follows:
+strategies: LAVa-Uniform, which is equivalent
+to LAVa (-layer), and LAVa-Pyramid, which re-              • O(HN 2dh) for the original cache of one
+tains LAVa’s head budget allocation and layer-wise            layer, same as SnapKV;
+cache eviction but adopts Pyramid for layer allo-
+cation. The results in Table 13 indicate that our          • O(HN wdh) for recomputing the recent atten-
+method outperforms these alternatives. Notably,               tion scores, same as SnapKV;
+LAVa-Pyramid requires finetuning, whereas the
+other methods do not. Moreover, LAVa-Pyramid               • O(HN dh) for computing the value norms for
+fails to outperform LAVa-Uniform at higher bud-               each token;
+gets, aligning with the observed comparison be-
+tween Ada-SnapKV and Ada-Pyramid. This un-                 • O(HN logBl) for layer-wise cache eviction
+derscores the limitation of heuristic-based designs,          because the eviction of LAVa is operated in
+which may not always yield optimal results.                   all cache of one layer.
+                      Single-Doc. QA                Multi-Doc. QA                Summarization                 Few-shot Learning                Synthetic                Code
+
+                                                                                                                                                                                                                                                       Avg
+                                                                                                                                                                                                                                        RepoBench-P
+                                                                                                                                                                                                                               Lcc
+
+                                                                                                                                                                                                                    PR-zh
+
+                                                                                                                                                                                                         PR-en
+                                                                                                                                                                                              PCount
+                                                                                                                                                                                     LSHT
+                                                                                                                                                                         SAMSum
+                                                                                                                                                              TriviaQA
+                                                                                                                                                    TREC
+                                                                                                                                       MultiNews
+                                                                                                                             VCSUM
+                                                                                                                  QMSum
+                                                                                                      GovReport
+                                                                                           Dureader
+                                                                                Musique
+                                                                    2WikiMQA
+                                                        HotpotQA
+                                             MF-zh
+                                   MF-en
+                         Qasper
+               NrtvQA
+
+Full Cache     29.05 43.34 52.52 62.27 57.59        47.05  30.24   29.25  31.78 23.64 15.96     23.96   72.50 88.82   45.61 42.75 8.50 100.00 96.50 59.61                67.12  48.96
+
+PyramidKV      21.96  26.41  42.53    52.77  49.33  42.17  23.48   17.88  16.80  B = 128HL      14.30   42.50  83.78  41.15 22.39 8.50          95.50      63.50  48.53  51.39  37.88
+SnapKV         25.24  27.66  43.90    53.53  51.00  42.12  24.59   18.56  18.04   19.29 11.24   15.55   41.00  83.18  40.68 24.88 9.00          98.00      81.50  49.44  52.58  39.60
+Ada-PyramidKV  23.08  27.53  42.07    53.17  50.73  42.03  23.31   18.03  17.48   19.85 11.32   14.71   42.50  83.90  41.25 22.81 9.00          94.00      76.00  49.17  52.69  38.78
+Ada-SnapKV     25.20  28.45  45.00    54.37  51.08  44.02  24.66   18.81  18.26   19.65 11.21   16.25   42.50  84.06  41.00 22.49 9.00          96.50      87.50  49.92  54.32  40.24
+CAKE           24.43  30.15  45.03    54.86  50.65  42.41  25.91   18.89  18.21   20.09 11.50   15.84   42.00  84.54  41.95 26.24 8.50          95.50      81.50  51.60  55.09  40.26
+LAVa (Ours)    23.29  28.87  46.80    56.10  52.65  42.96  25.09   19.25  18.24   20.66 11.60   16.28   43.00  84.56  42.18 23.95 8.50          96.00      85.00  53.45  56.07  40.69
+                                                                                  20.52 11.80
+                                                    42.31  25.06   19.54                        16.55                                                                    55.82  41.30
+PyramidKV      24.82  31.13  46.92    56.06  53.07  44.18  25.68   20.96  19.27  B = 256HL      18.52   50.00  84.88  42.04 25.39 8.50          96.00      85.50  52.03  59.42  43.32
+SnapKV         26.61  23.77  49.15    58.37  56.03  43.03  25.23   19.41  20.84   20.47 12.01   17.07   48.50  86.31  43.06 29.89 8.50          97.50      95.00  54.26  56.55  42.26
+Ada-PyramidKV  25.97  31.01  47.31    56.43  54.17  43.60  26.14   20.89  19.60   20.99 12.19   18.59   54.50  86.04  42.69 27.28 8.50          97.00      90.00  52.78  59.30  43.41
+Ada-SnapKV     26.52  34.50  50.01    58.28  55.61  44.42  26.47   20.35  21.30   21.09 11.87   18.53   52.50  85.50  42.97 28.43 8.50          98.00      93.50  53.94  61.13  43.53
+CAKE           26.59  33.95  49.80    58.25  54.89  44.13  27.25   20.88  21.23   20.94 12.51   18.96   47.50  85.41  43.51 32.33 8.50          97.50      94.00  55.56  62.19  43.84
+LAVa (Ours)    27.04  35.19  49.36    59.74  55.35                        21.15   21.94 12.35           49.00  86.73  43.42 30.35 8.50          98.00      93.00  56.19
+                                                    44.72  25.85   20.94          21.51 12.77   18.95                                                                    59.42  44.48
+                                                    44.69  27.28   21.98                        20.64                                                                    62.69  45.32
+PyramidKV      28.02  35.74  50.84    58.11  55.26  44.66  26.74   21.35  21.83  B = 512HL      19.32   59.50  86.13  43.04 32.83 8.50 99.00 96.00 55.65                 60.99  44.83
+SnapKV         28.27  28.22  50.69    60.27  56.18  45.06  28.81   22.04  23.79   21.34 12.33   20.80   59.50  84.10  43.68 35.52 8.50 100.00 94.00 56.66                62.71  45.71
+Ada-PyramidKV  27.31  37.36  49.62    58.57  55.40  45.21  26.31   22.20  22.39   21.89 13.20   20.57   62.00  86.29  43.78 33.33 8.50 99.00 95.50 55.78                 63.95  45.45
+Ada-SnapKV     28.03  38.51  50.06    60.54  55.50  45.25  27.75   22.91  23.98   21.12 12.42   20.84   62.00  85.83  44.37 37.10 8.50 100.00 94.00 56.44                64.57  45.74
+CAKE           28.17  39.09  50.22    60.00  54.89                        23.65   22.49 13.05           57.50  85.60  44.61 37.23 8.50 99.50 94.00 58.27
+LAVa (Ours)    27.21  39.08  50.47    60.09  55.63  45.38  29.31   22.42  23.83   21.98 13.04   21.12   58.50  86.15  45.02 37.43 8.50 100.00 93.50 58.02                62.56  46.47
+                                                    45.04  28.95   23.97          22.81 13.05   22.50                                                                    65.59  47.43
+                                                    45.80  29.18   23.01                        21.25                                                                    63.31  46.69
+PyramidKV      28.06  40.11  51.83    60.22  57.55  45.75  29.30   23.64  24.35  B = 1024HL     22.39   68.00  85.27  44.18 36.99 8.50 100.00 96.50 58.29                65.77  47.47
+SnapKV         29.01  42.02  51.86    61.22  56.82  45.02  30.48   23.82  26.26   22.04 13.12   22.45   68.50  86.85  45.52 42.50 8.50 100.00 96.50 57.94                65.99  47.47
+Ada-PyramidKV  28.52  40.50  51.87    60.27  56.42  45.27  30.01   23.99  24.45   22.76 13.66   22.42   69.00  86.41  45.10 37.79 8.50 100.00 96.50 57.16                66.24  47.64
+Ada-SnapKV     29.61  42.30  51.79    60.29  56.38                        26.21   22.10 13.31           69.00  88.09  45.36 41.75 8.50 100.00 96.00 58.15
+CAKE           29.70  41.08  51.85    60.64  57.34                        25.92   22.80 13.85           67.50  86.63  45.22 42.00 8.50 100.00 96.50 59.49
+LAVa (Ours)    29.79  41.68  51.84    60.79  57.04                        26.36   22.95 13.69           69.50  87.42  45.46 41.00 8.50 100.00 96.50 59.97
+                                                                                  22.90 13.81
+
+Table 6: Final comparison based on Qwen2.5-7B-Instruct among 21 datasets of LongBench. (Note: The best result
+is highlighted in bold, and the second is in underline. )
+
+                      Single-Doc. QA                Multi-Doc. QA                Summarization                 Few-shot Learning                Synthetic                Code
+
+                                                                                                                                                                                                                                                        Avg
+                                                                                                                                                                                                                                         RepoBench-P
+                                                                                                                                                                                                                               Lcc
+
+                                                                                                                                                                                                                    PR-zh
+                                                                                                                                                                                                          PR-en
+                                                                                                                                                                                              PCount
+                                                                                                                                                                                     LSHT
+                                                                                                                                                                         SAMSum
+                                                                                                                                                              TriviaQA
+                                                                                                                                                    TREC
+                                                                                                                                       MultiNews
+                                                                                                                             VCSUM
+                                                                                                                  QMSum
+                                                                                                      GovReport
+                                                                                           Dureader
+                                                                                Musique
+                                                                    2WikiMQA
+                                                        HotpotQA
+                                             MF-zh
+                                   MF-en
+                         Qasper
+               NrtvQA
+
+                                                                          Qwen2.5-14B-Instruct
+
+Full Cache     29.33 45.19 53.59 62.79 62.59        57.69  38.47   29.87 29.74 23.53 14.75 21.90        77.50  90.23  47.27 50.00 9.23 98.67 98.25 62.60                 51.13  50.21
+
+PyramidKV      19.67  22.26  39.57    50.04  50.75  49.47  30.31   16.67  Qwen2.5-14B-Instruct, B=128h  42.00  82.29  40.90       27.00  12.12  82.50      56.67  54.52  41.38  37.03
+SnapKV         21.04  25.50  42.11    49.89  54.31  51.87  33.60   17.78    16.10 19.43 10.53 13.51     43.50  85.95  41.81       26.75  10.50  89.58      65.00  55.42  43.42  39.07
+Ada-PyramidKV  20.85  24.83  40.88    51.78  54.65  52.34  29.78   16.83    17.12 19.95 10.75 14.53     46.50  80.76  40.58       25.75  11.18  87.75      63.75  53.72  43.49  37.90
+Ada-SnapKV     22.16  25.58  42.80    52.22  55.10  53.21  33.50   17.98    16.67 19.59 10.32 13.90     45.50  85.62  42.49       27.00  9.05   91.33      68.17  56.26  43.39  39.76
+CAKE           22.20  26.13  42.10    50.83  54.75  53.25  31.77   17.73    17.69 20.25 10.86 14.81     44.00  87.51  42.65       28.50  13.96  86.50      78.83  54.92  43.90  40.16
+LAVa (Ours)    22.24  26.52  43.09    52.39  55.97  53.43  33.68   18.23    17.56 19.98 10.84 15.44     46.00  86.79  42.20       27.17  10.53  92.00      73.00  55.74  44.63  40.39
+                                                                            17.94 20.57 10.98 15.10
+                                                    55.26  36.82                                        68.50  89.21                                                     48.71  46.59
+PyramidKV      26.18  38.19  48.71    59.81  60.74  54.86  37.47   20.55  Qwen2.5-14B-Instruct, B=512h  66.50  88.78  45.38 44.25 8.59          98.33      96.75  59.71  49.42  46.95
+SnapKV         26.99  39.34  48.84    59.34  60.20  55.69  37.72   21.43    21.21 21.27 11.86 18.43     70.00  88.59  45.95 45.25 8.22          98.25      98.58  61.12  48.85  47.00
+Ada-PyramidKV  26.78  40.25  49.71    60.40  60.64  55.63  38.34   20.75    22.25 21.95 11.93 19.34     69.50  89.01  45.70 44.50 8.77          98.33      96.75  60.23  49.92  47.48
+Ada-SnapKV     26.03  41.56  49.42    60.88  59.99  55.19  38.37   21.33    21.49 21.54 11.67 18.60     70.00  89.03  46.35 46.75 7.72          98.17      98.50  62.21  49.31  47.17
+CAKE           25.39  39.92  48.62    60.30  60.42  55.36  37.50   21.40    22.49 22.09 11.96 19.32     67.00  88.68  46.19 46.25 6.68          98.17      98.25  60.90  50.38  47.18
+LAVa (Ours)    26.23  40.65  48.93    59.45  60.34                 21.53    22.56 21.72 12.31 19.57                   46.50 46.75 7.98          97.75      97.75  61.85
+                                                    53.85  32.25            22.57 22.13 11.91 19.48     48.00  54.41                                                     35.36  38.29
+                                                    55.52  30.78                                        48.50  58.30                                                     35.82  38.37
+                                                    55.65  32.96          Qwen2.5-32B-Instruct          51.50  56.24                                                     35.94  39.78
+                                                    56.14  32.54                                        49.50  60.07                                                     36.29  39.72
+Full Cache                                          54.89  32.86                 OOM                    46.50  56.35                                                     36.05  39.07
+                                                    58.51  33.72                                        48.50  57.21                                                     36.68  39.83
+PyramidKV      21.32  27.86  43.55    56.05  55.74                 16.74  Qwen2.5-32B-Instruct, B=128h                40.69       29.50  11.17  94.00      73.09  48.04
+SnapKV         21.72  28.31  42.83    56.03  54.43  60.44  34.75   16.94    17.08 18.88 10.71 15.76     66.00  55.11  39.64       27.50  12.00  93.75      74.37  47.15  38.12  43.86
+Ada-PyramidKV  21.19  29.67  45.61    58.04  57.30  60.60  34.85   17.45    16.92 19.04 10.53 15.69     66.50  77.77  40.24       30.25  12.00  97.00      82.67  48.14  39.15  45.82
+Ada-SnapKV     21.79  28.64  45.49    56.56  57.12  61.86  37.55   17.66    17.37 19.30 10.89 16.02     67.50  60.81  40.03       27.50  12.00  96.04      85.13  47.96  38.27  44.79
+CAKE           21.28  28.40  43.30    55.71  55.93  61.60  37.23   17.04    17.63 19.31 10.66 16.12     69.00  77.87  40.38       31.88  12.50  94.79      82.92  46.63  39.14  46.24
+LAVa (Ours)    22.29  30.12  45.50    57.06  56.59  61.42  37.11   17.50    17.00 19.44 10.50 16.18     66.50  77.31  40.23       28.17  10.00  97.42      84.09  48.12  38.99  46.04
+                                                    60.83  37.25            17.42 19.97 11.09 16.29     68.50  77.69                                                     38.86  46.35
+
+PyramidKV      26.00  37.40  48.67    61.17  60.60                 19.37  Qwen2.5-32B-Instruct, B=512h                42.71       39.00  11.56  99.75      98.54  50.28
+SnapKV         25.71  40.23  48.81    62.94  61.16                 20.64    20.84 20.61 11.64 18.48                   44.01       41.86  11.19  100.00     99.03  52.20
+Ada-PyramidKV  26.41  38.97  50.14    61.50  61.50                 19.67    22.69 21.27 11.61 20.04                   43.40       39.75  11.08  99.75      99.62  50.60
+Ada-SnapKV     27.51  39.44  49.21    63.09  61.70                 20.35    21.49 20.71 11.23 18.68                   44.19       42.04  11.56  100.00     98.24  52.22
+CAKE           25.32  40.24  49.66    63.28  59.75                 20.44    22.69 21.72 11.74 20.45                   43.92       44.58  11.19  100.00     98.78  52.36
+LAVa (Ours)    26.56  41.18  50.80    62.49  61.90                 21.44    22.73 21.22 11.67 20.28                   43.97       42.23  11.50  100.00     98.53  52.24
+                                                                            23.16 22.02 11.86 20.30
+
+Table 7: Final comparison based on Qwen2.5-14B-Instruct and Qwen2.5-32B-Instruct among 21 datasets of
+LongBench. (Note: The best result is highlighted in bold, and the second is in underline.)
+                      Single-Doc. QA                Multi-Doc. QA                Summarization                Few-shot Learning        Synthetic                Code
+
+                                                                                                                                                                                                                                                      Avg
+                                                                                                                                                                                                                                       RepoBench-P
+                                                                                                                                                                                                                             Lcc
+
+                                                                                                                                                                                                                  PR-zh
+                                                                                                                                                                                                        PR-en
+                                                                                                                                                                                              PCount
+                                                                                                                                                                                     LSHT
+                                                                                                                                                                         SAMSum
+                                                                                                                                                              TriviaQA
+                                                                                                                                                    TREC
+                                                                                                                                       MultiNews
+                                                                                                                             VCSUM
+                                                                                                                  QMSum
+                                                                                                      GovReport
+                                                                                           Dureader
+                                                                                Musique
+                                                                    2WikiMQA
+                                                        HotpotQA
+                                             MF-zh
+                                   MF-en
+                         Qasper
+               NrtvQA
+
+Full Cache     21.23 43.25 44.68 57.47 48.12        38.55  24.72 27.46    29.97 22.19 0.18      27.32 73.00 90.50 42.04 23.50 7.00 70.50 93.00 60.76            48.85  44.71
+
+PyramidKV      18.36  30.37  42.49    49.83  47.59  35.11  23.20   18.65  18.62  B = 128HL      20.27  49.50  88.67  38.52 21.00 3.75  68.50      91.00  58.54  50.29  39.76
+SnapKV         18.88  30.10  41.33    50.68  47.16  34.47  23.91   18.73  18.43   20.95 0.07    19.63  46.50  87.98  38.25 20.00 3.50  68.00      89.50  59.16  52.97  39.51
+Ada-PyramidKV  16.62  32.27  43.41    50.49  47.07  35.70  24.09   19.27  19.63   20.92 0.08    20.96  58.50  89.10  38.41 21.00 4.00  68.50      93.50  59.27  51.72  40.73
+Ada-SnapKV     17.78  30.31  42.60    49.81  46.94  34.97  23.72   19.16  19.21   21.14 0.06    20.37  55.50  89.68  38.96 21.00 4.00  69.00      93.50  60.32  53.52  40.58
+CAKE           18.40  30.92  42.41    49.50  47.04  35.08  24.03   18.77  18.77   21.28 0.09    19.74  47.00  89.34  38.03 20.75 4.00  68.50      92.00  58.97  53.33  39.88
+LAVa (Ours)    17.24  31.54  43.26    49.96  46.69  35.17  24.09   18.99  19.02   20.95 0.07    20.52  52.50  89.22  38.45 20.00 4.00  69.00      93.50  59.74  53.58  40.38
+                                                                                  21.19 0.12
+                                                    36.44                                                                                                       49.74  41.71
+PyramidKV      18.34  36.26  43.69    52.91  47.19  36.88  25.03   20.28  20.59  B = 256HL      22.50  61.50  88.77  39.26 21.75 5.00  70.00      93.00  60.36  52.57  41.84
+SnapKV         19.37  35.25  42.82    52.53  46.57  36.39  24.68   20.10  20.75   21.57 0.14    22.39  61.00  89.82  38.94 22.00 5.00  70.00      94.00  61.16  50.27  42.18
+Ada-PyramidKV  18.71  37.29  44.59    53.63  47.26  36.29  24.33   20.92  21.06   21.15 0.16    23.22  65.50  89.81  39.07 22.75 4.50  69.50      92.50  61.00  51.91  42.26
+Ada-SnapKV     18.65  36.66  45.14    52.62  47.27  36.76  24.84   19.91  21.41   21.32 0.14    22.70  65.50  89.72  39.15 22.25 5.50  69.50      93.00  62.11  52.65  41.84
+CAKE           19.41  35.81  43.14    51.81  47.19  36.57  24.76   20.30  20.81   21.14 0.15    22.50  60.50  89.94  39.09 21.75 5.00  69.50      93.50  61.45  53.69  42.65
+LAVa (Ours)    19.16  37.04  45.15    53.58  47.87         24.61   20.84  21.41   21.02 0.12    23.14  65.00  90.36  39.93 22.00 5.50  70.00      93.00  62.70
+                                                    37.81                         21.41 0.15                                                                    49.51  43.26
+                                                    37.38                                                                                                       50.51  43.25
+PyramidKV      19.63  40.70  43.99    55.36  47.30  37.90  24.90   22.43  22.78  B = 512HL      24.38  68.50  90.23  40.18 23.75 7.00  70.50      93.00  61.83  49.77  43.52
+SnapKV         19.67  40.65  45.65    54.68  47.57  37.75  24.37   21.39  22.65   21.44 0.16    24.44  68.00  90.19  40.32 23.25 7.00  70.00      93.00  62.59  51.64  43.55
+Ada-PyramidKV  19.46  41.42  46.19    55.86  47.72  37.33  24.54   21.98  22.91   21.78 0.17    24.85  69.50  90.23  40.60 23.50 6.50  70.50      93.50  61.64  50.55  43.37
+Ada-SnapKV     19.38  41.03  45.05    55.53  47.30  37.96  24.61   21.73  23.10   21.84 0.12    24.70  70.50  90.23  40.49 23.75 6.50  70.50      93.50  62.21  51.57  43.70
+CAKE           19.83  41.69  45.76    54.77  47.23         25.08   21.51  22.56   21.59 0.15    24.34  69.00  90.19  40.47 23.00 7.00  70.00      93.00  62.64
+LAVa (Ours)    19.35  41.52  45.53    55.49  47.25  37.23  24.36   22.01  23.19   21.50 0.17    25.38  70.50  90.21  41.30 23.75 7.00  70.50      93.50  62.04  49.31  43.66
+                                                    37.77                         21.53 0.17                                                                    50.53  43.80
+                                                    37.62                                                                                                       48.65  43.82
+PyramidKV      19.73  41.62  43.51    56.75  48.73  38.01  24.32   22.76          B = 1024HL    25.97  71.00  90.23  40.99 23.75 6.00  71.00      93.00  60.66  50.30  44.16
+SnapKV         19.31  41.67  43.92    56.25  47.90  38.10  24.50   22.55  24.72 21.91 0.15      25.91  72.00  90.24  41.43 23.50 6.50  71.00      93.00  61.59  50.17  43.81
+Ada-PyramidKV  20.23  41.47  44.82    56.39  48.48  38.09  24.35   23.59  24.76 21.72 0.25      26.05  71.00  90.23  41.34 23.75 6.00  71.00      93.00  61.01  50.23  44.30
+Ada-SnapKV     19.99  42.07  45.86    57.16  48.29         24.40   23.60  25.14 22.24 0.17      26.10  72.00  90.31  41.50 23.50 6.50  71.00      93.50  61.62
+CAKE           19.29  41.67  43.72    56.38  47.70         24.83   22.72  25.37 22.19 0.16      26.25  72.00  90.24  41.59 23.50 6.00  71.00      93.00  61.46
+LAVa (Ours)    20.93  42.74  46.43    57.26  48.35         24.44   23.26  24.68 21.90 0.21      26.25  72.50  90.39  42.05 23.50 6.00  71.00      93.00  61.93
+                                                                          25.26 22.33 0.17
+
+Table 8: Final comparison Based on Llama3-8B-Instruct among 21 datasets of LongBench. (Note: The best result is
+highlighted in bold, and the second is in underline.)
+
+Methods                               Mistral-7B Qwen2.5-7B                      HN 2dh, which is approximately 0.01% when
+                                                                                 N = 10, 000. The computation time increases
+Full Cache                                   99.88                 99.66         with the increase of the number of layers and batch
+                                                                                 size for both SnapKV and LAVa, but the ratio of
+                                                    B = 128HL                    the extra computation time for LAVa is still 0.01%.
+                                                                                 A similar analysis can be achieved to see that all
+PyramidKV                                    91.44                 91.10         the other methods have similar latency, aligning
+SnapKV                                                                           with the latency results in Figure 3.
+Ada-PyramidKV                                91.25                 93.28
+Ada-SnapKV                                                                       Analysis of Memory Usage. We analyze the dif-
+CAKE                                         92.08                 92.70         ference between SnapKV and LAVa/CAKE, which
+LAVa (Ours)                                                                      are dynamic layer budget methods.
+                                             92.12                 94.30
+                                                                                    • For SnapKV, the cache size increases from
+                                             92.79                 94.61               O(HKdh) in the first layer to the last layer,
+                                                                                       where it reaches the peak of O(LHBl,hdh).
+                                             93.35                 95.57               The memory peaks when the latest (full)
+                                                                                       layer cache O(HN dh) is not pruned, and
+                                             B = 1024HL                                the current retained cache reaches the size of
+                                                                                       O(LHBl,hdh). In sum, the peak memory is
+PyramidKV                                    97.88                 99.56               O(HN dh + LHBl,hdh).
+SnapKV
+Ada-PyramidKV                                97.95                 99.48
+Ada-SnapKV
+CAKE                                         98.58                 99.58
+LAVa (Ours)
+                                             98.54                 99.53
+
+                                             98.32                 99.55
+
+                                             98.95                 99.59
+
+Table 9: Average scores of Mistral-7B-Instruct-v0.2 and
+Qwen2.5-7B-Instruct in Needle In A HayStack.
+
+For one layer l, the difference of time complexity                                            • For LAVa and CAKE, the cache size is always
+                                                                                                O(LHBl,hdh) from the first layer to the last
+between LAVa and SnapKV is O(HN (dh +logH).                                                     layer, yet it is distributed among prefilled lay-
+In a long context, N is very large, and thus                                                    ers. The memory peak, however, is similar to
+                                                                                                SnapKV, which is O(HN dh + LHBl,hdh),
+O(HN (dh + logH) is much smaller than the dom-                                                  except that for LAVa/CAKE, we need to store
+inant factor O(HN 2dh). Based on the setting of                                                 the layer scores. As we save only the top
+Mistral-7B-Instruct-v0.2, we have dh = 128 and                                                  scores for each layer, the size for scores is
+H = 32, the extra computation of LAVa com-                                                      O(LHBl,h). Given that the total cache size
+
+pared to SnapKV is HN (dh + logH) divided by
+        Single-Doc. QA                      Multi-Doc. QA              Summarization                Few-shot Learning  Synthetic                     Code
+
+                                                                                                                                                                                                                                              Avg
+                                                                                                                                                                                                                               RepoBench-P
+                                                                                                                                                                                                                     Lcc
+
+                                                                                                                                                                                                          PR-zh
+                                                                                                                                                                                                PR-en
+                                                                                                                                                                                      PCount
+                                                                                                                                                                             LSHT
+                                                                                                                                                                 SAMSum
+                                                                                                                                                      TriviaQA
+                                                                                                                                            TREC
+                                                                                                                               MultiNews
+                                                                                                                     VCSUM
+                                                                                                          QMSum
+                                                                                              GovReport
+                                                                                   Dureader
+                                                                        Musique
+                                                            2WikiMQA
+                                                HotpotQA
+                                     MF-zh
+                           MF-en
+                 Qasper
+       NrtvQA
+
+Full Cache 26.77 32.34 49.63 48.42 43.43    27.89  18.61 30.85  32.92  24.54 15.04 27.20 71.00 86.23 43.41 39.00 2.81 86.56 89.75 55.29              52.55  45.07
+
+LAVa (Ours) 19.57 21.11 44.29 33.91  38.29  23.59  15.32 18.56  19.33  B = 128HL      21.07  53.50  85.20  40.16       21.75 2.88 69.87 74.75 51.94  48.92  36.74
+   − layer 20.32 21.18 45.17 35.00   37.37  23.62  15.09 18.20  19.21  22.32 11.42    20.99  48.50  85.32  39.33       20.75 3.42 67.93 73.75 51.28  47.52  36.20
+   − head 20.33 20.27 44.06 32.23    36.64  22.84  14.19 18.15  18.88  22.04 11.35    20.89  45.00  84.29  39.57       20.25 3.21 65.23 64.25 51.88  47.51  34.95
+                                                                       21.51 11.09
+                                            25.96  16.77 20.26  21.92                                                                                51.77  40.12
+LAVa (Ours) 22.70 24.67 48.62 37.81  39.68  25.53  16.21 19.94  21.86  B = 256HL      22.91  65.00  85.24  41.28       26.75 2.88 76.76 85.75 54.17  49.85  39.77
+   − layer 21.78 24.74 47.82 37.47   39.06  25.50  15.47 19.43  21.55  22.48 11.88    22.91  62.00  85.37  41.53       25.25 2.77 78.53 87.67 52.78  51.19  38.80
+   − head 21.34 22.77 47.43 35.87    37.71                             23.22 11.81    22.86  58.00  84.88  41.69       22.25 3.11 74.77 84.18 53.89
+                                            26.88  18.33 21.12  23.59  23.06 12.08                                                                   52.85  42.59
+                                            26.17  18.50 20.74  24.00                                                                                51.22  42.11
+LAVa (Ours) 25.01 27.84 48.97 42.14  40.95  25.79  17.87 20.68  23.91  B = 512HL      24.51  68.50  86.34  42.48       33.50 2.90 87.23 89.83 55.83  52.53  41.82
+   − layer 24.43 27.98 48.72 41.00   40.23                             23.59 12.28    24.20  66.50  86.04  42.26       32.75 2.84 87.89 89.33 54.11
+   − head 23.59 27.70 48.61 40.61    40.22  27.38  19.48 23.48  26.06  23.40 12.68    24.28  66.50  86.09  41.95       28.50 2.97 86.88 89.17 55.73  53.28  43.65
+                                            27.03  18.83 22.73  25.79  23.39 12.38                                                                   51.67  43.35
+                                            27.63  18.59 22.64  26.29                                                                                53.22  43.26
+LAVa (Ours) 25.59 31.21 48.27 43.43  41.92                             B = 1024HL     26.00  70.00  86.22  42.43       38.00 2.73 87.01 88.75 57.31
+   − layer 25.76 30.38 49.54 43.54   41.08                             23.86 13.38    25.88  69.50  86.30  43.10       37.25 2.71 87.56 89.25 55.04
+   − head 25.76 29.61 49.31 42.77    40.82                             23.69 13.13    25.82  68.00  85.82  41.77       35.00 2.63 89.06 89.25 57.31
+                                                                       23.77 12.70
+
+Table 10: Ablation study based on Mistral-7B-Instruct-v0.2 among 21 datasets of LongBench. (Note: The best
+result is highlighted in bold. )
+
+Context Length 4K 8K 16K                                               Analysis of Layer Attention Output Loss. To
+                                                                       validate the effectiveness of LAVa in minimizing
+PyramidKV                            72.55  62.02          55.42       layer attention output loss, we compare LAVa with
+SnapKV                               70.71  61.52          55.61       AdaKV, which also aims to minimize layer atten-
+Ada-PyramidKV                        70.80  60.83          54.95       tion output loss and its scoring function is the same
+Ada-SnapKV                           71.14  60.31          55.05       with SnapKV. We set the cache budget as 128 to
+CAKE                                 72.41  61.55          55.84       make the difference clear and calculate the loss
+LAVa (Ours)                          75.39  62.61          56.70       in the first and the last layer. The backbone is
+                                                                       Mistral-7B-Instruct-v0.2. The results in Table 14
+Table 11: Results of Mistral-7B-Instruct-v0.2 in Ruler.                are consistent with the evaluation of other bench-
+                                                                       marks, proving that the upper bound of LAVa is
+                                                                       tighter compared to that of AdaKV.
+
+Tasks                   En Sum En MC En Dia
+
+PyramidKV                            25.3 67.2 6.5
+
+SnapKV                               25.1 67.2 7.0
+
+Ada-PyramidKV 24.9 67.2 7.0
+
+Ada-SnapKV                           24.6 66.8 7.0
+
+CAKE                                 24.8 67.8 6.6
+
+LAVa (Ours)                          25.4 66.8 9.5
+
+Table 12: Results of Mistral-7B-LongPO-128K in In-
+finiteBench.
+
+is O(LHBl,hdh), it is sufficient to just keep a
+total of LHK scores for comparison. Again,
+the extra factor is dominated by O(HN dh +
+LHBl,hdh). The extra memory usage of
+LAVa is 0.6% of SnapKV peak memory
+when L = H = 32, Bl,h = 1024, dh = 128,
+and N = 10, 000. This is small, but not as
+negligible as in time complexity, consistent
+with Figure 3. However, dynamic layer bud-
+get is important for tasks like summarization
+or code generation, as shown in Figure 2.
+            Single-Doc. QA                   Multi-Doc. QA              Summarization        Few-shot Learning        Synthetic               Code
+
+                                                                                                                                                                                                                                                   Avg
+                                                                                                                                                                                                                                    RepoBench-P
+                                                                                                                                                                                                                          Lcc
+
+                                                                                                                                                                                                               PR-zh
+                                                                                                                                                                                                     PR-en
+                                                                                                                                                                                           PCount
+                                                                                                                                                                                  LSHT
+                                                                                                                                                                      SAMSum
+                                                                                                                                                           TriviaQA
+                                                                                                                                                 TREC
+                                                                                                                                    MultiNews
+                                                                                                                          VCSUM
+                                                                                                               QMSum
+                                                                                                   GovReport
+                                                                                        Dureader
+                                                                             Musique
+                                                                 2WikiMQA
+                                                     HotpotQA
+                                          MF-zh
+                                MF-en
+                      Qasper
+            NrtvQA
+
+Full Cache  26.77 32.34 49.63 48.42 43.43    27.89  18.61 30.85  32.92 24.54 15.04     27.20 71.00 86.23  43.41 39.00 2.81 86.56 89.75 55.29  52.55  45.07
+
+LAVa-Pyramid 19.91 20.36 44.32 35.06  37.68  23.58  15.40 17.99  19.61  B = 128HL      21.05 52.00 84.45  40.09 20.25 2.89 72.32 76.92 51.81  46.81  36.63
+LAVa-Uniform 20.32 21.18 45.17 35.00  37.37  23.62  15.09 18.20  19.21  22.09 10.87    20.99 48.50 85.32  39.33 20.75 3.42 67.93 73.75 51.28  47.52  36.20
+LAVa (Ours) 19.57 21.11 44.29 33.91   38.29  23.59  15.32 18.56  19.33  22.04 11.35    21.07 53.50 85.20  40.16 21.75 2.88 69.87 74.75 51.94  48.92  36.74
+                                                                        22.32 11.42
+                                             24.94  16.70 19.11                        22.77 62.50 85.17  41.34 23.75 3.34 79.07 86.58 52.25  49.70  39.40
+LAVa-Pyramid 21.22 23.96 47.86 37.12  38.92  25.53  16.21 19.94  21.43  B = 256HL      22.91 62.00 85.37  41.53 25.25 2.77 78.53 87.67 52.78  49.85  39.77
+LAVa-Uniform 21.78 24.74 47.82 37.47  39.06  25.96  16.77 20.26  21.86  22.44 11.20    22.91 65.00 85.24  41.28 26.75 2.88 76.76 85.75 54.17  51.77  40.12
+LAVa (Ours) 22.70 24.67 48.62 37.81   39.68                      21.92  23.22 11.81
+                                             26.18  18.26 20.82         22.48 11.88    24.08 67.00 86.66  42.55 32.00 2.93 86.13 89.62 53.46  51.53  41.88
+                                             26.17  18.50 20.74                        24.20 66.50 86.04  42.26 32.75 2.84 87.89 89.33 54.11  51.22  42.11
+LAVa-Pyramid 24.59 27.33 48.36 40.24  39.75  26.88  18.33 21.12  23.39  B = 512HL      24.51 68.50 86.34  42.48 33.50 2.90 87.23 89.83 55.83  52.85  42.59
+LAVa-Uniform 24.43 27.98 48.72 41.00  40.23                      24.00  23.38 12.35
+LAVa (Ours) 25.01 27.84 48.97 42.14   40.95  27.20  19.40 22.61  23.59  23.40 12.68    25.71 68.50 86.19  43.19 37.00 2.67 87.73 90.25 54.72  51.53  43.19
+                                             27.03  18.83 22.73         23.59 12.28    25.88 69.50 86.30  43.10 37.25 2.71 87.56 89.25 55.04  51.67  43.35
+                                             27.38  19.48 23.48                        26.00 70.00 86.22  42.43 38.00 2.73 87.01 88.75 57.31  53.28  43.65
+LAVa-Pyramid 24.88 29.51 49.01 42.57  41.16                      25.58  B = 1024HL
+LAVa-Uniform 25.76 30.38 49.54 43.54  41.08                      25.79   24.00 13.08
+LAVa (Ours) 25.59 31.21 48.27 43.43   41.92                      26.06   23.69 13.13
+                                                                         23.86 13.38
+
+Table 13: Layer allocation comparison based on Mistral-7B-Instruct-v0.2 among 21 datasets of LongBench. (Note:
+The best result is highlighted in bold. )
+
+Tasks Qasper HotpotQA Gov Report TriviaQA Passage Retrieval ZH LCC
+
+                                                                        Layer 0
+
+AdaKV 1.77                                   1.63                1.82                  2.64                     1.59             1.91
+
+LAVa 1.61                                    1.59                1.73                  2.61                     1.40             1.86
+
+AdaKV 134.69 133.33                                              Layer 31                                 93.50                  149.25
+LAVa 132.97 130.02                                          107.94 121.53                                 90.50                  147.16
+                                                            106.06 121.31
+
+                                             Table 14: Results of Layer Attention Output Loss.
+

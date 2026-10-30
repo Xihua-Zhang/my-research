@@ -1,0 +1,1126 @@
+                                           TrigReason: Trigger-Based Collaboration between Small and Large
+                                                                           Reasoning Models
+
+                                                                    Yi Zhao1,2, Yajuan Peng3, Cam-Tu Nguyen4,
+                                                        Zuchao Li5,∗, Xiaoliang Wang4, Xiaoming Fu6,3, Hai Zhao1,2, *
+                                        1AGI Institute, School of Computer Science, Shanghai Jiao Tong University, Shanghai, China
+                                              2Key Laboratory of Shanghai Education Commission for Intelligent Interaction and
+
+                                                    Cognitive Engineering, Shanghai Jiao Tong University, Shanghai, China
+                                              3Shanghai Key Laboratory for Intelligent Information Processing, Fudan University
+
+                                                   4State Key Laboratory for Novel Software Technology, Nanjing University
+                                                                 5School of Artificial Intelligence, Wuhan University
+
+                                                 6Institute of Computer Science, University of Göttingen, Göttingen, Germany
+
+arXiv:2604.14847v1 [cs.AI] 16 Apr 2026  Abstract                                                      1 Introduction
+
+                                             Large Reasoning Models (LRMs) achieve                    Large Reasoning Models (LRMs) (OpenAI, 2024;
+                                             strong performance on complex tasks through              DeepSeek-AI, 2025) have recently emerged as
+                                             extended chains of thought but suffer from high          a powerful paradigm for tackling complex prob-
+                                             inference latency due to autoregressive reason-          lem by leveraging extended chains of thought
+                                             ing. Recent work explores using Small Reason-            (CoT) (Wei et al., 2022; Yao et al., 2024a,b) during
+                                             ing Models (SRMs) to accelerate LRM infer-               inference. Unlike standard large language mod-
+                                             ence. In this paper, we systematically char-             els (LLMs) that directly generate output tokens,
+                                             acterize the capability boundaries of SRMs               LRMs performs an internal reasoning process by
+                                             and identify three common types of reason-               generating a sequence of thinking tokens, which
+                                             ing risks: (1) path divergence, where SRMs               break down the input question into intermediate
+                                             lack the strategic ability to construct an ini-          reasoning steps prior to producing the final answer.
+                                             tial plan, causing reasoning to deviate from             This structured reasoning behavior enables state-of-
+                                             the most probable path; (2) cognitive overload,          the-art performance across diverse domains such as
+                                             where SRMs fail to solve particularly difficult          mathematical reasoning (Qwen Team, 2025b), code
+                                             steps; and (3) recovery inability, where SRMs            generation (Ahmad et al., 2025), and agent (Kimi
+                                             lack robust self-reflection and error correction         Team, 2025). However, this enhanced reasoning
+                                             mechanisms. To address these challenges, we              capacity comes at a significant cost: the autore-
+                                             propose TrigReason, a trigger-based collabora-           gressive generation of long CoT sequences, often
+                                             tive reasoning framework that replaces contin-           spanning thousands of thinking tokens, leads to pro-
+                                             uous polling with selective intervention. Tri-           longed response delays. This limitation has driven
+                                             gReason delegates most reasoning to the SRM              recent research into accelerating LRM inference.
+                                             and activates LRM intervention only when nec-
+                                             essary—during initial strategic planning (strate-           Previous approaches to reasoning efficiency have
+                                             gic priming trigger), upon detecting extraor-            primarily focused on refining the effective density
+                                             dinary overconfidence (cognitive offload trig-           of CoT to mitigate redundant or excessive rea-
+                                             ger), or when reasoning falls into unproduc-             soning (Zhao et al., 2025c). Among these, rein-
+                                             tive loops (intervention request trigger). The           forcement learning with a length penalty is widely
+                                             evaluation results on AIME24, AIME25, and                adopted to encourage concise and effective reason-
+                                             GPQA-D indicate that TrigReason matches                  ing trajectories (Luo et al., 2025; Yang et al., 2025).
+                                             the accuracy of full LRMs and SpecReason,                Alternative methods explore supervised fine-tuning
+                                             while offloading 1.70×–4.79× more reason-                using variable-length CoT data to promote efficient
+                                             ing steps to SRMs. Under edge–cloud con-                 inference (Xia et al., 2025; Kang et al., 2024; Ma
+                                             ditions, TrigReason reduces latency by 43.9%             et al., 2025). Moreover, prompt engineering also
+                                             and API cost by 73.3%. Our code is available             have been proposed to guide models toward more
+                                             at https://github.com/QQQ-yi/TrigReason                  streamlined reasoning through carefully designed
+                                                                                                      input prompts (Wu et al., 2025; Xu et al., 2025;
+                                            * Corresponding author. This research was supported by    Zhao et al., 2025b). Although these approaches
+                                        the Shanghai Jiao Tong University 2030 Initiative, the Major  enhance inference efficiency, they typically impose
+                                        Program of Chinese National Foundation of Social Sciences
+                                        under Grant ‘The Challenge and Governance of Smart Me-
+                                        dia on News Authenticity’ [No. 23&ZD213], the National
+                                        Natural Science Foundation of China (Grant No. W2531047)
+                                        and the National Natural Science Foundation of China (No.
+                                        62306216).
+a reduced token budget for reasoning, which may          consumption) while maintaining accuracy and sub-
+lead to skipping critical logical steps or preventing    stantially reducing end-to-end latency.
+necessary self-correction in the reasoning process.
+A separate strand of work aims to develop small             We evaluate TrigReason extensively on
+language models with strong reasoning capabil-           three challenging reasoning benchmarks,
+ities (Dang and Ngo, 2025; Zhao et al., 2025a).          AIME24 (AIME, 2024), AIME25 (AIME, 2025),
+However, these methods may also suffer perfor-           and GPQA Diamond (Rein et al., 2024) across
+mance degradation due to the limited capabilities        diverse SRM-LRM combinations. Results show
+of small models.                                         that TrigReason maintains accuracy compared
+                                                         with both the full LRM and SpecReason, while
+   Recently, SpecReason (Pan et al., 2025) observes      utilizing 1.70× to 4.79× more SRM-generated
+that many LRM reasoning steps can be semanti-            tokens than SpecReason, indicating significantly
+cally covered by small reasoning model (SRM),            higher reasoning steps offloading efficiency. Under
+and proposes a speculative paradigm that veri-           edge-cloud collaboration scenarios, TrigReason
+fies SRM-generated steps via an LRM-as-a-Judge           achieves reduction of 43.9% in latency and 73.3%
+mechanism. While SpecReason can effectively re-          in API cost compared to SpecReason. These
+duce latency, it faces two key limitations. First, the   results demonstrate that TrigReason establishes a
+LRM’s judgment is often unreliable(§2.1). Model          more effective paradigm for collaborative reason-
+judgment is inherently subjective due to behavior        ing between small and large models, achieving
+biases ingrained during training. Besides, evalu-        significant improvements in inference efficiency
+ating individual reasoning steps is challenging, as      without compromising accuracy.
+the chain of thought remains incomplete. Second,
+as illustrated in Figure 1a, its polling-based de-       2 Motivation
+sign, where the LRM is invoked at every reasoning
+step to validate the SRM’s output regardless of the      Recent advances in speculative reasoning have
+complexity, resulting in significant overhead, es-       shown that collaboration between SRM and LRM
+pecially in edge-cloud collaboration (§2.2). These       can accelerate inference without sacrificing solu-
+limitations lead to inefficient speculative reason-      tion quality. SpecReason (Pan et al., 2025) exempli-
+ing, as excessive LRM intervention results in the        fies this progress by adopting an LRM-as-a-Judge
+final output being dominated by LRM-generated            framework, where the LRM is prompted to score
+corrections rather than SRM reasoning.                   each reasoning step generated by the SRM, de-
+                                                         termining whether to accept or reject it. In this
+   These inefficiencies originate from an incom-         section, we explore two key limitations hindering
+plete understanding of when and why SRM fails.           its practical effectiveness:
+Existing methods resort to frequent and blind ver-
+ification, sacrificing efficiency for effectiveness.        Unreliable LRM judgment: (1) the inherent
+In this paper, we first characterize the capability      biases of each model, which make the judge prone
+boundaries of the SRM to identify the most com-          to subjectivity rather than serving as an objective
+mon reasoning errors: path divergence risk, cogni-       detector of errors; and (2) the difficulty of assess-
+tive overload risk, and recovery inability risk (§3.1).  ing intermediate reasoning steps when chains of
+Based on this analysis, we propose TrigReason, a         thought are not yet fully formed, thus often unclear.
+event-triggered collaborative reasoning framework
+that shifts LRM correction from polling to selective        Inefficiency of polling-based execution: the
+intervention. As shown in Figure 1b, instead of con-     step-level granularity of LRM invocation leads
+tinuous verification, TrigReason allows the SRM          to frequent communication and computation over-
+to reason autonomously until one of three purpose-       head, especially in edge-cloud collaboration.
+designed triggers fires: (1) a strategic priming step
+from the LRM at the start, (2) a cognitive offload          These limitations undermine intended accelera-
+trigger when confidence becomes extraordinary, or        tion benefits of speculative reasoning, as the ma-
+(3) an intervention request when the SRM detects         jority of the final output is derived from the correc-
+stagnant reasoning loops. As shown in Figure 1c,         tions of LRM.
+1d and 1e, this shift enables TrigReason to signifi-
+cantly increase the proportion of tokens generated       2.1 Unreliability of LRM Judgment
+by SRM (from 35.55% to 61.37% of total token
+                                                         While SpecReason advances speculative inference
+                                                         efficiency in reasoning acceleration, its LRM-as-
+                                                         a-Judge mechanism suffers from a critical flaw, as
+Reasoning steps: “Alright, so I have this                              Not Triggered             Strategic Priming               Triggered
+geometry problem here. Let me try...”                          Small Model Reasoning:                    Trigger        Large Model Reasoning:
+                                                               “Triangle ABC with sides 5, 9,                           “E = (-33√14)/28, so -E/2 =
+Request evaluation: “Evaluate the last                         10. So, it's a scalene            Cognitive Offload      (33√14)/56. So center O is
+reasoning step based on correctness.”                          triangle…”                                Trigger        (9/2, 33√14/56)…”
+
+Small Model    Polling                     Large Model        Small Model                      Intervention Request               Large Model
+(Speculative)                                 (Target)        (Speculative)                             Trigger                       (Target)
+
+                       ✔: Keep going
+
+                       ❌ : The step should be: “…”
+
+    (a) SpecReason framework.                                                     (b) TrigReason framework.
+
+                                           650                6SHF5HDVRQ          7ULJ5HDVRQ   /50
+
+             $,0(                                    H              $,0(                                        $,0(
+SDVV#                                                                                                                      V
+                                                              6507RNHQV          /507RNHQV
+                                            7RNHQ&RQVXPSWLRQ
+                                                                                      $YHUDJH/DWHQF\V
+                                            3HUFHQWDJHRI6507RNHQV                     
+
+                                                                                        V
+                                                                                                                        V
+                                                                                                           
+
+                                                                                                  V
+
+                                                                                                        
+
+                                                                                                       
+
+(c) Accuracy comparison.                                 (d) Token usage percentage.                       (e) Latency comparison.
+
+Figure 1: Overview of the reasoning frameworks and performance evaluation between SpecReason and TrigReason.
+The evaluation is on AIME24 benchmark using DeepSeek-R1-1.5B as SRM and QwQ-32B as LRM
+
+LRM fails to reliably validate the correctness of                         is evaluated over 16 runs to compute the average
+reasoning steps from SRM.                                                 rejection rate across reasoning trajectories. Figure
+                                                                          2b presents results on three questions where the
+   Due to inherent biases in model training, LRM                          SRM can correctly solve, as the remaining results
+judgments are often preference-driven, leading to                         are shown in Appendix A. The results reveal that
+subjective judgments for the same content across                          the LRM rejects 50.1% to 80.9% of correct and
+different models. We evaluate identical reasoning                         valid reasoning steps generated by the SRM. More
+trajectories using four different LRMs. As shown                          surprisingly, the LRM even rejects up to 63.7% of
+in Figure 2a, the LRMs assign widely divergent                            its own generation.
+scores to the same trajectory (from 1.87 to 8.93).
+This polarization indicates that LRM judgments are                           These results indicate that the LRM-as-a-Judge
+heavily influenced by model-specific priors, rather                       paradigm is unreliable in verifying reasoning steps.
+than objective reasoning quality.                                         Due to discrepancies of model inherent biases and
+                                                                          the difficulty of assessing intermediate reasoning
+   Furthermore, to assess the difficulty of verifying                     steps, the LRM is prone to regenerate the correct
+intermediate reasoning steps in incomplete chains                         draft of SRM that differ only in phrasing or reason-
+of thought, we sample reasoning trajectories from                         ing path. This unreliable judgment forces excessive
+the AIME24 dataset. We categorize these trajecto-                         LRM intervention to ensure solution quality, signif-
+ries into three types (defined below), and evaluate                       icantly undermining the efficiency of speculative
+SpecReason to quantify the unreliability verifica-                        reasoning.
+tion, using QwQ-32B as the LRM and DeepSeek-
+R1-1.5B as the SRM:                                                       2.2 Inefficiency of Polling-based Execution
+
+   • SpecReason: trajectories of SpecReason with                          SpecReason adopts polling-based execution that
+      mixed steps from SRM and LRM;                                       requires the LRM to intervene at every reasoning
+                                                                          step, ignoring both step complexity and the SRM’s
+   • SRM-Correct: trajectories from the SRM                               internal confidence. Frequent LRM calls incur sub-
+      that yield correct final answers;                                   stantial overhead, and also diminish the expected
+                                                                          efficiency gains of speculative reasoning.
+   • LRM-Own: trajectories generated indepen-
+      dently by the LRM itself.                                              In edge-cloud setups, a representative deploy-
+                                                                          ment for speculative reasoning, the SRM executes
+We follow SpecReason’s experimental setup: the                            on resource-constrained edge devices while the
+LRM assigns scores in the range [0, 9], with a                            LRM operates in the cloud. Frequent polling un-
+threshold of 7 for acceptance, and each question                          der this architecture induces significant network
+                                                                      
+$YHUDJH-XGJH6FRUH             6SHF5HDVRQ
+                                  $YHUDJH5HMHFWLRQ5DWH                                                                                       
+                                650&RUUHFW                                                  
+                                                                                         $YHUDJH/DWHQF\V
+                                                                                                                         1RUPDOL]HG$3,&RVW/502ZQ
+                                                                                                                                           
+
+                                                                                      
+                                                      
+                                                                                                                                           
+
+                                                                                                                                                               
+                                                                                                                                       
+
+                           
+
+  4Z4%                                                                                                                                    
+
+   6N\ZRUN25%                                                                               /50RQO\                                         /50RQO\
+                                                                                                    6SHF5HDVRQ
+   4ZHQ%$%7KLQNLQJ                                                                     7ULJ5HDVRQ                                       6SHF5HDVRQ
+
+   'HHS6HHN9                                    4XHVWLRQ,'                                  (c)                                                 7ULJ5HDVRQ
+
+   (a)                                              (b)                                                                                              (d)
+
+Figure 2: (a) Average judge scores of same trajectories from four different LRM, showing extreme inter-judge
+inconsistency. (b) Average rejection rate on three reasoning trajectories. Even for correct steps and LRM-own
+generation, LRM judgment still shows high-level rejection rate. (c) and (d) are comparison of average latency and
+API cost in edge-cloud collaborative reasoning, respectively.
+
+round-trips and API costs, exacerbating system-                        capability gap between SRM and LRM: path diver-
+level inefficiencies. We implement a edge-cloud                        gence risk, cognitive overload risk, and recovery
+deployment to quantify the effect, as the SRM                          inability risk.
+(DeepSeek-R1-1.5B) runs locally and the LRM
+is accessed via DeepSeek API. As shown in Figure                          To identify the critical steps and risk patterns, we
+2c and 2d, even compared to LRM-only execu-                            compared correct and incorrect reasoning trajecto-
+tion, SpecReason exhibits lower efficiency, with a                     ries through different scaled reasoning models on
+22.44% increase in latency and a 42.31% higher                         the AIME24 datasets. Figure 3 shows three typical
+API cost.                                                              risk patterns, which characterize the capability gap
+                                                                       between different model scales. Examples of the
+3 method                                                               three risks are shown in Appendix B.
+
+To address the shortcomings of polling-based LRM                          (1) Path Divergence Risk: occurs at the be-
+verification, we propose TrigReason, guided by                         ginning of reasoning process, representing a fault-
+two key ideas: (1) studying how SRM fails in or-                       oriented solution branch. Unlike factual halluci-
+der to identify the most common reasoning risks,                       nations or arithmetic mistakes, it arises from the
+thereby enabling more objective targeting and re-                      SRM’s failure to decompose the problem or antici-
+ducing blind reliance on LRM judges; and (2) trig-                     pate the implications of alternative approaches.
+gering LRM for speculative reasoning correction
+based on event signals rather than at every step,                         As the study case shown in Appendix B, SRMs
+which reduces the number of LRM calls and sig-                         often jump to computation or apply familiar but
+nificantly lowers latency. Allowing SRM to gen-                        unsuitable methods, whereas larger models first
+erate the reasoning chain to some extent before                        analyze problem structure and plan strategically.
+intervention also makes the reasoning path more                        The observation highlights the lack of strategic
+explicit, enabling LRM to deliver more effective                       foresight in smaller models during initial planning.
+corrections.
+                                                                          Insight: let the LRM generate initial reasoning
+3.1 Characterization of SRM Reasoning Risks                            steps for strategic planning or problem decomposi-
+                                                                       tion, enabling the SRM to efficiently execute down-
+The limitations of current speculative reasoning                       stream steps under a validated reasoning path.
+originate from an insufficient understanding of
+when and why SRM fails, resulting in an inability                         (2) Cognitive Overload Risk: occurs in a subset
+to distinguish between harmless reasoning varia-                       of specific steps that demand high cognitive load,
+tions and high-risk steps. By characterizing the                       such as complex arithmetic computations requir-
+capability boundaries of the SRM, LRM interven-                        ing the retention of numerous intermediate states
+tion can be reserved only for critical steps, avoiding                 (e.g., multi-step fraction simplification, symbolic
+excessive verification and missed interventions. To                    manipulation, or multi-hop logical inference).
+address this issue, we conduct a systematic analy-
+sis of reasoning trajectories generated by SRM and                        As the study case shown in Appendix B, al-
+identify three core failure modes that cause distinct                  though relatively infrequent, these errors are highly
+                                                                       consequential, leading cascading failures in subse-
+                                                                       quent reasoning steps. Yet for routine reasoning
+                                                                       (e.g., interpretation, sequencing, and simple calcu-
+                                                                       lation), smaller models are reliable. Therefore, the
+Start Point               Right N Steps …
+
+                                                             ❌                        Right Way
+                                                                                      Wrong Way
+                 …            Hard Step …                             …               Right Action
+                                                                                      Wrong Action
+(a) Path Divergence Risk  (b) Cognitive Overload Risk              Stuck              Chosen Path
+
+                                                         (c) Recovery Inability Risk
+
+Figure 3: Illustration of three typical risk patterns reflecting the SRM-LRM capability gap.
+
+key lies in identifying a insightful signal to detect    request trigger. Owing to sparse yet crucial LRM
+cognitive overload in the SRM.                           intervention, TrigReason ensures high answer qual-
+                                                         ity while enabling efficient and low-cost collabora-
+   We analyze 160 reasoning trajectories from            tive reasoning, as shown in Figure 2c and 2d.
+SRMs on 10 problems with significant SRM–LRM
+performance gaps. Among the 93 trajectories con-         3.2.1 Strategic Priming Trigger
+taining clear SRM incorrect reasoning steps, 94.6%
+steps exhibit overconfident steps (i.e., over 85% of     The Strategic Priming Trigger is designed to ad-
+tokens have perplexity < 1.05), compared to only
+38.1% overconfidence steps across all steps (see         dress the Path Divergence Risk. By decoupling
+Appendix D for details). This pattern shows SRM
+failure is often preceded by abnormally low token-       strategic planning from step-by-step execution, Tri-
+level perplexity, indicating overconfident and deter-
+ministic generation. The overconfidence is not a         gReason uses the LRM to perform initial reasoning,
+sign of capability, but rather a symptom of mechan-
+ical pattern completion under cognitive overload.        ensuring the SRM begins on a valid and coherent
+
+   Insight: SRMs are limited not by reasoning abil-      trajectory.
+ity throughout the process, but by cognitive capac-
+ity. This pattern motivates a light-touch interven-          Specifically, given an input question x, we first
+tion strategy: leveraging overconfidence as a signal
+of cognitive overload to trigger LRM assistance,         sample the first n reasoning steps from the LRM
+keeping the SRM on a correct reasoning trajectory.
+                                                         L:
+   (3) Recovery Inability Risk: occurs when mi-
+nor errors or ambiguous interpretations lead the                         y1:n ∼ pL(y1:n | x),                 (1)
+SRM to deviate from the correct path, resulting
+in increasingly incoherent reasoning. In contrast,       where pL denotes the conditional distribution of the
+LRM can implicitly reflect, detect anomalies, and        LRM, and n is a pre-defined priming steps. After
+backtrack to correct its approach.                       this priming phase, control is transferred to the
+                                                         SRM S, which continues the reasoning chain:
+   As the study case shown in Appendix B, SRMs
+lack the ability to detect deviations or initiate self-      yt ∼ pS(yt | y<t, x), for t > n. (2)
+correction, causing them to persist on erroneous
+paths and eventually stagnate.                           3.2.2 Cognitive Offload Trigger
+
+   Insight: let LRM to reflect and re-guide the path-    The Cognitive Offload Trigger aims to address the
+enabling corrective when signs of stagnation or          Cognitive Overload Risk. TrigReason leverages
+contradiction are detected in the SRM’s reasoning        the extraordinary overconfidence of SRM as an
+trajectory.                                              early warning signal to trigger LRM intervention
+                                                         at critical junctures.
+3.2 Event-triggered LRM intervention
+                                                            To quantify this behavior, we define the token-
+Based on the observations in §3.1, we propose Tri-       level perplexity at position t as:
+gReason, a trigger-based framework for collabora-
+tive SRM-LRM execution. TrigReason introduces                PPL(t) = exp (− log pS(yt | y<t, x)) , (3)
+three targeted triggers to address critical failure
+risks in SRM reasoning: strategic priming trig-          where pS(yt | y<t, x) is the probability assigned
+ger, cognitive offload trigger, and intervention         by the SRM to token yt, given the prefix y<t and
+                                                         input x. For a given reasoning step s, let Ts denote
+                                                         the set of token positions in s. We compute the
+                                                         low-perplexity ratio rs as the fraction of tokens in
+                                                         s with perplexity below a threshold τ :
+
+                                                                rs    =  1                 1 [PPL(t)  <  τ],  (4)
+
+                                                                         |Ts|         t∈Ts
+where τ is a sensitivity threshold and 1 [·] is the       conduct experiments across four SRM-LRM pair-
+indicator function, equal to 1 if the condition is true,  ings to evaluate the generalization of TrigReason
+and 0 otherwise. The Cognitive Offload Trigger            under diverse model architectures and scales. In
+fires when rs > ρ, where ρ is a coverage threshold:       the edge-cloud deployment setting, the LRM
+                                                          (DeepSeek-V3.1, 671B MoE) is accessed via
+Trigcognitive(s) = 1 [rs > ρ] .  (5)                      DeepSeek API (DeepSeek API, 2025).
+
+Upon activation, the current step s is regenerated        Datasets. AIME24 (AIME, 2024) and
+by the LRM:                                               AIME25 (AIME, 2025) are high-school math
+                                                          competition problems requiring multi-step al-
+ys ∼ pL(· | y<s, x).             (6)                      gebraic and combinatorial reasoning. GPQA
+                                                          Diamond (Rein et al., 2024) is a graduate-level
+3.2.3 Intervention Request Trigger                        multiple-choice question set that covers advanced
+                                                          topics in physics, chemistry and biology, known
+The Intervention Request Trigger aims to mitigate         for its high factual and logical complexity. We
+the Recovery Inability Risk. TrigReason moni-             also evaluate TrigReason on additional reasoning
+tors for linguistic markers of reasoning stagnation,      domains such as logical and commonsense
+and invokes the LRM to realign the reasoning path         reasoning in Appendix 4.5.
+upon detection. Obesevation indicates that, SRM
+often generates distinctive hesitation patterns (e.g.,    Evaluation Metrics. (1) Accuracy: following
+"wait", "hmm", "alternatively"), which reflects an        prior work (Pan et al., 2025), we use pass@1 with
+implicit recognition of difficult reasoning steps.        k = 16. Specifically, 16 responses are sampled
+                                                          for each question at temperature = 0.6, and the
+   We define a finite set H of hesitation words for       final accuracy is calculated as the average accuracy
+detection (Appendix E includes the complete list).        for every response. (2) Efficiency: as the total
+At each reasoning step s, we determine whether            token consumption across methods is similar, we
+the generation contains at least one token from H:        utilize the ratio of tokens generated by the SRM
+                                                          to the total reasoning tokens as a robust efficiency
+hs = 1 [∃ yt ∈ ys such that yt ∈ H] . (7)                 metric, donated as SMT percentage. We exclude
+                                                          latency from evaluation, as it is highly sensitive to
+The Intervention Request Trigger fires when hesi-         hardware, system load, and scheduling variability,
+tation is observed in k consecutive steps:                which could confound cross-method comparisons.
+
+                      k−1                                    The method performance is visualized through
+                                                          the Accuracy-Efficiency plane, where the x and
+Trigintervention = 1       hs−i = k , (8)                 y axis represent SMT percentage and pass@1, re-
+                                                          spectively. Closer to the top-right performs better.
+                      i=0
+                                                          Baselines. (1) SpecReason (Pan et al., 2025), a
+   Upon activation, the system transfers control to       polling-based collaborative method. (2) standalone
+the LRM for the next m steps:                             reasoning framework using only the SRM or only
+                                                          the LRM.
+ys+1:s+m ∼ pL(· | y≤s, x),       (9)
+                                                          Implementation Details. All experiments are
+then LRM is able to assess the current state, identify    conducted on 8 NVIDIA RTX 4090 GPUs using
+inconsistencies, and recorrect reasoning path. After      SGLang v0.4.9 (Zheng et al., 2023) as the inference
+m steps, control returns to the SRM. The main             engine, with prefix caching and tensor parallelism
+algorithm of TrigReason is shown in Appendix F.           (degree 4) enabled. We set the logprobs=True pa-
+                                                          rameter during request to calculate token-level per-
+4 Experiments                                             plexity. Unless otherwise stated, generation uses
+                                                          temperature = 0.6 and top_p = 0.95. The default
+4.1 Setup                                                 token budget is 8192 tokens; for the impact of think-
+                                                          ing budget analysis (Appendix 4.6), we evaluate
+Models. LRM: QwQ-32B (Qwen Team,                          budgets ranging from 2K to 32K. For TrigReason
+2025b) (32B dense model) and Qwen3-30B-                   parameters, we set the priming step count n = 20
+A3B-Thinking-2507 (Qwen Team, 2025a) (30B
+MoE model, 3B active). SRM: DeepSeek-
+R1-1.5B (DeepSeek-AI, 2025) and Qwen3-
+0.6B (Qwen Team, 2025a). Both models are
+equipped with CoT reasoning capabilities. We
+and rectification steps m = 1. The cognitive over-       TrigReason successfully offloads up to 59.4%
+load threshold ρ is set to 0.85 for DeepSeek-R1-      of reasoning tokens to the SRM, while requiring
+1.5B and 0.75 for Qwen3-0.6B with τ = 0.85. The       the LRM to generate only 40.6% steps, with just
+rationale for these hyperparameter choices is justi-  a 2.49% absolute accuracy drop compared to full
+fied through ablation studies in (§4.4).              LRM execution. In contrast, SpecReason suffers
+                                                      from degraded accuracy despite high SRM token
+4.2 Main Results                                      usage, due to unreliable verification by the LRM,
+                                                      as analyzed in Section 2.1. We observe that when
+We evaluate TrigReason on AIME24, AIME25,             acting as verifier, DeepSeek-V3.1 often assigns
+and GPQA Diamond across four SRM-LRM com-             high scores to semantically weak or incomplete
+binations, comparing against vanilla LRM/SRM          SRM-generated steps, likely influenced by its own
+baselines and SpecReason. The results are shown       inductive biases in reasoning style. This leads to ac-
+in Figure 4.                                          ceptance of invalid speculative steps, enabling error
+                                                      propagation and ultimately compromising solution
+   Stable Accuracy. Despite offloading substan-       correctness.
+tial reasoning to the SRM, TrigReason consistently
+matches or even exceeds LRM performance. On           4.4 Ablation Study
+average, it achieves 105.8% (AIME24), 104.7%
+(AIME25), and 99.6% (GPQA Diamond) of the             To evaluate the contribution of each component
+LRM’s accuracy across model pairs, with individ-      in TrigReason, we conduct ablation studies on the
+ual configurations (Qwen3-0.6B + Qwen3-30B-           three proposed triggers and their associated hyper-
+A3B-Thinking- 2507 on AIME24) reaching up to          parameters. We also provide a more detailed statis-
+119.3%. In several cases, TrigReason surpasses the    tical analysis of their trigger activation frequencies
+LRM baseline, suggesting that trigger-based inter-    in Appendix C.
+vention can yield robust and effective reasoning
+trajectories.                                         Cognitive Overload Threshold ρ. We analyze ρ,
+                                                      which governs activation of the Cognitive Offload
+   Higher Efficiency. While matching SpecRea-         Trigger. Lower ρ prompts earlier LRM interven-
+son in accuracy, TrigReason achieves significantly    tion; ρ = 1 disables the trigger entirely. We fix
+greater efficiency. On average, TrigReason utilizes   n = 20, m = 1, and use two representative model
+1.70×−4.79× more SRM tokens than SpecReason           pairs: DeepSeek-R1-1.5B + QwQ-32B and Qwen3-
+across benchmarks. Specifically, the SMT Percent-     0.6B + Qwen3-30B-A3B-Thinking.
+age increases by 1.70×, 4.79×, 1.88×, and 3.94×
+across the four combinations. This substantial gain      As shown in Figure 6a, disabling the Cognitive
+indicates that TrigReason’s mechanism more effec-     Offload Trigger (ρ = 1) causes a significant accu-
+tively identifies and accepts valid reasoning steps.  racy drop, confirming its critical role in preventing
+                                                      error accumulation when the SRM exceeds its ca-
+   In general, the results show that TrigReason       pacity. Crucially, the optimal ρ is model-dependent:
+achieves accuracy on par with LRM-only, while sig-    DeepSeek-R1-1.5B + QwQ-32B pair achieves peak
+nificantly improving efficiency through increased     performance at ρ = 0.85, while Qwen3-0.6B +
+SRM utilization and less LRM calls. The evalu-        Qwen3-30B-A3B-Thinking pair performs more sta-
+ation results indicate that TrigReason achieves a     bly at ρ = 0.75. This reflects intrinsic SRM differ-
+superior efficiency-accuracy trade-off, represent-    ences in average perplexity and reasoning reliabil-
+ing a clear advancement in step-level speculative     ity. While higher ρ improves accuracy, it reduces
+reasoning for collaborative inference.                SMT percentage, trading off efficiency. Thus, ρ
+                                                      acts as a tunable knob balancing accuracy and effi-
+4.3 Evaluation in Edge-Cloud Collaboration            ciency based on the specific SRM-LRM pair.
+
+To assess TrigReason in realistic deployment sce-     Priming Steps n. We vary n from 0 to 50
+narios, we simulate an edge-cloud setup: the          (withρ = 0.85 and m = 1) to assess the Strate-
+SRM (DeepSeek-R1-1.5B) runs locally, while            gic Priming Trigger, which enables LRM-provided
+the LRM is accessed remotely via the DeepSeek         planning before SRM execution.
+API (DeepSeek API, 2025), which internally uses
+DeepSeek-V3.1. Latency and API cost are reported         Figure 6b shows that reducing n from 20 to 0 in-
+in Figure 2c and Figure 2d; here, we present accu-    curs a 25.4% absolute accuracy drop, underscoring
+racy results on AIME24 in Figure 5.                   the importance of strategic guidance in enabling
+                                  LRM                  SpecReason TrigReason                        SRM
+
+pass@1 (%)30              AIME24           pass@1 (%)60          GPQA-D               pass@1 (%)30          AIME25
+
+          20  Better                                 50  Better                                 20  Better
+          10                                         40                                         10
+                                                     30
+
+              0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100
+
+pass@1 (%)                AIME24           (a) DeepSeek-R1G-P1.Q5AB-D+ QwQ-32B        pass@1 (%)            AIME25
+          30                               pass@1 (%)80
+                                                                                                30
+          20  Better                                 60  Better                                     Better
+          10                                         40                                         20
+                                                                                                10
+              0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100
+
+                          AIME24  (b) Qwen3-0.6B + QwGePnQ3-A3-0DB-A3B-Thinking                             AIME25
+pass@1 (%)30                               pass@1 (%)                                 pass@1 (%)30
+                                                     60
+          20                                         50
+          10  Better                                 40  Better                                 20  Better
+                                                     30                                         10
+
+              0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100
+
+pass@1 (%)                AIME24           pass@1 (%)  (c) Qwen3-0.G6BPQ+AQ-DwQ-32B   pass@1 (%)            AIME25
+          30                                         80
+                                                                                                30
+          20  Better                                 60  Better                                     Better
+          10                                         40                                         20
+                                                                                                10
+              0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100                0 SMT25Perce50ntag7e5(%)100
+
+                                    (d) DeepSeek-R1-1.5B + Qwen3-30B-A3B-Thinking
+
+Figure 4: Performance comparison across benchmarks and model combinations. The vertical axis shows accuracy
+(higher is better), and the horizontal axis shows the percentage of tokens generated by the SRM (SMT Percentage),
+reflecting reasoning efficiency (higher is more efficient).
+
+                        AIME24pass@1 (%)                         reasoning loops. We fix ρ = 0.85, n = 20.
+                                                                    Figure 6c shows that m = 1 already recovers
+             30
+             20                                                  most of the performance gap, with marginal gains
+             10                                                  from m = 2 or m = 3. This suggests that the
+                                                                 LRM’s corrective capability is highly concentrated:
+            0 SMT25Perce50ntag7e5(%)100                          a single high-quality step often suffices to realign
+                                                                 the reasoning path. Larger m unnecessarily in-
+Figure 5: Accuracy on AIME24 in an edge-cloud setup.             creases LRM usage and reduces efficiency, making
+                                                                 m = 1 the optimal trade-off in practice.
+autonomous SRM reasoning. However, increas-
+ing n beyond 30 yields diminishing returns and                   4.5 Performance on Diverse Reasoning
+degrades efficiency. This indicates that early strate-                 Domains
+gic guidance is critical, while excessive priming
+wastes LRM capacity on execution.                                To evaluate the generalizability of TrigReason
+Rectification Steps m. We evaluate the Interven-                 beyond mathematical reasoning, we conduct ex-
+tion Request Trigger by varying m, the number                    periments on two additional benchmarks: Big-
+of LRM-generated steps after detecting stagnant
+          32  Overload  Th0.r7e0s.h7o5l0d.8:     0.85           32  PSrtiempisnng:  50 30  20                        32 Rectification Steps3m2: 1
+          28                                        0.90.95     28                    40     10
+pass@1 (%)                                                      pass@1 (%)                                           28
+                                                                                                           pass@1 (%)
+          24  QDeweQp-S3e2eBk-R1-1.5B +                      1  24                                     0             24                            0
+
+20            QQwweenn33--03.06BB-A+3B-Thinking                 20                                                   20
+
+            20 30 SMT40Perce50ntage60(%) 70 80                   20 30 SMT40Perce50ntage60(%) 70 80                   20 30 SMT40Perce50ntage60(%) 70 80
+
+                        (a)                                                         (b)                                  (c)
+
+                        Figure 6: Ablation studies on TrigReason’s three triggers and their hyperparameters.
+
+Bench Hard (BBH) (Suzgun et al., 2023), which                                            both LRM-only and SpecReason, demonstrating its
+focuses on complex logical reasoning, and the AI2
+Reasoning Challenge (ARC) (Clark et al., 2018),                                          effectiveness and generalization under constrained
+which requires commonsense and scientific knowl-
+edge. We use the same model pair as in the main                                          reasoning resources.
+experiments—DeepSeek-R1-1.5B as the SRM and
+QwQ-32B as the LRM. Since BBH and ARC are                                                  60              SRM
+less computationally demanding than AIME24, we
+reduce the number of priming step in strategic prim-                                                       SpecReason
+ing trigger from 20 to 5 for efficiency. All other                                       pass@1 (%)40      TrigReason
+hyperparameters, including the cognitive overload                                                          LRM
+threshold (ρ = 0.85, corresponding to perplexity
+< 1.05) and the rectification steps intervention re-                                               20
+quest mechanism (m = 1), are kept unchanged
+from the original math reasoning setup, without                                                      0 2K       4K Token8BKudget 16K 32K
+any domain-specific tuning.
+                                                                                         Figure 7: Accuracy comparison under different token
+   The results are shown in Table 1. TrigReason                                          budgets.
+achieves an accuracy of 0.687 on BBH and 0.948
+on ARC-Challenge, outperforming both the SRM                                                However, as the budget increases, TrigReason
+alone and SpecReason. Notably, it even slightly                                          and SpecReason exhibit a relative performance gap
+exceeds the performance of LRM inference while                                           compared to LRM-only reasoning. This suggests
+using the LRM only sparingly. The consistent gains                                       that while collaborative reasoning is highly effi-
+across math, logical, and commonsense reasoning                                          cient at lower budgets, it may introduce slight sub-
+suggest that our heuristics capture general signals                                      optimality when targeting very peak accuracy in
+of reasoning difficulty rather than overfitting to a                                     resource-abundant settings.
+specific domain. This supports the robustness and
+transferability of TrigReason’s design.                                                  5 Conclusion
+
+Table 1: Performance comparison on BBH and ARC                                           We propose TrigReason, a collaborative reason-
+dataset. All methods use DeepSeek-R1-1.5B as SRM                                         ing framework between small and large reasoning
+and QwQ-32B as LRM.                                                                      models, which achieves better trade-off among ac-
+                                                                                         curacy, efficiency, and cost through a trigger-based
+Dataset SRM LRM SpecReason TrigReason                                                    mechanism that introduces sparse yet critical LRM
+                                                                                         interventions.
+BBH           0.422 0.675                        0.663              0.687
+ARC           0.593 0.957                        0.942              0.948                Limitations
+
+4.6 Performance under Varying Token                                                      Although TrigReason provides a practical and gen-
+      Budgets                                                                            eralizable approach to improving the efficiency of
+                                                                                         reasoning models, certain aspects of its trigger de-
+We evaluate the effect of varying thinking token                                         sign rely on heuristic criteria. For instance, the
+budgets (2K, 4K, 8K, 16K, 32K) on performance                                            cognitive offload trigger is based on model over-
+using AIME24. As shown in Figure 7, TrigReason                                           confidence. However, the relationship between
+consistently outperforms the SRM-only baseline                                           overconfidence and actual reasoning errors remains
+across all settings and matches the performance of                                       insufficiently understood and warrants further in-
+                                                                                         vestigation. Additionally, like most speculative
+                                                                                         inference methods, TrigReason primarily targets
+latency reduction. This comes at the memory over-         Qwen Team. 2025a. Qwen3 technical report. Preprint,
+head from the small reasoning model, which may               arXiv:2505.09388.
+limit its applicability in memory-constrained de-
+ployment environments.                                    Qwen Team. 2025b. Qwq-32b: Embracing the power of
+                                                             reinforcement learning. https://qwenlm.github.
+References                                                   io/blog/qwq-32b/.
+
+Wasi Uddin Ahmad, Sean Narenthiran, Somshubra Ma-         David Rein, Betty Li Hou, Asa Cooper Stickland, Jack-
+   jumdar, Aleksander Ficek, Siddhartha Jain, Jocelyn        son Petty, Richard Yuanzhe Pang, Julien Dirani, Ju-
+   Huang, Vahid Noroozi, and Boris Ginsburg. 2025.           lian Michael, and Samuel R. Bowman. 2024. GPQA:
+   Opencodereasoning: Advancing data distillation for        A graduate-level google-proof q&a benchmark. In
+   competitive coding. Preprint, arXiv:2504.01943.           First Conference on Language Modeling.
+
+AIME. 2024. Aime 2024 dataset. https:                     Mirac Suzgun, Nathan Scales, Nathanael Schärli, Se-
+   //huggingface.co/datasets/HuggingFaceH4/                  bastian Gehrmann, Yi Tay, Hyung Won Chung,
+   aime_2024.                                                Aakanksha Chowdhery, Quoc Le, Ed Chi, Denny
+                                                             Zhou, and Jason Wei. 2023. Challenging BIG-bench
+AIME. 2025. Aime 2025 dataset. https://                      tasks and whether chain-of-thought can solve them.
+   huggingface.co/datasets/math-ai/aime25.                   In Findings of the Association for Computational Lin-
+                                                             guistics: ACL 2023, pages 13003–13051, Toronto,
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot,        Canada. Association for Computational Linguistics.
+   Ashish Sabharwal, Carissa Schoenick, and Oyvind
+   Tafjord. 2018. Think you have solved question          Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten
+   answering? try arc, the ai2 reasoning challenge.          Bosma, Fei Xia, Ed Chi, Quoc V Le, Denny Zhou,
+   arXiv:1803.05457v1.                                       and 1 others. 2022. Chain-of-thought prompting elic-
+                                                             its reasoning in large language models. Advances
+Quy-Anh Dang and Chris Ngo. 2025. Reinforcement              in neural information processing systems, 35:24824–
+   learning for reasoning in small llms: What works and      24837.
+   what doesn’t. Preprint, arXiv:2503.16219.
+                                                          Yifan Wu, Jingze Shi, Bingheng Wu, Jiayi Zhang, Xi-
+DeepSeek-AI. 2025. Deepseek-r1: Incentivizing rea-           aotian Lin, Nan Tang, and Yuyu Luo. 2025. Con-
+   soning capability in llms via reinforcement learning.     cise reasoning, big gains: Pruning long reasoning
+   Preprint, arXiv:2501.12948.                               trace with difficulty-aware prompting. Preprint,
+                                                             arXiv:2505.19716.
+DeepSeek API. 2025. DeepSeek API Documenta-
+   tion. https://api-docs.deepseek.com/. Ac-              Heming Xia, Chak Tou Leong, Wenjie Wang, Yongqi
+   cessed: 2025-09-20.                                       Li, and Wenjie Li. 2025. Tokenskip: Controllable
+                                                             chain-of-thought compression in llms. Preprint,
+Yu Kang, Xianghui Sun, Liangyu Chen, and Wei Zou.            arXiv:2502.12067.
+   2024. C3ot: Generating shorter chain-of-thought
+   without compromising effectiveness. Preprint,          Silei Xu, Wenhao Xie, Lingxiao Zhao, and Pengcheng
+   arXiv:2412.11664.                                         He. 2025. Chain of draft: Thinking faster by writing
+                                                             less. Preprint, arXiv:2502.18600.
+Kimi Team. 2025. Kimi k2: Open agentic intelligence.
+   Preprint, arXiv:2507.20534.                            Junjie Yang, Ke Lin, and Xing Yu. 2025. Think when
+                                                             you need: Self-adaptive chain-of-thought learning.
+Haotian Luo, Li Shen, Haiying He, Yibo Wang, Shi-            Preprint, arXiv:2504.03234.
+   wei Liu, Wei Li, Naiqiang Tan, Xiaochun Cao,
+   and Dacheng Tao. 2025. O1-pruner: Length-              Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran,
+   harmonizing fine-tuning for o1-like reasoning prun-       Tom Griffiths, Yuan Cao, and Karthik Narasimhan.
+   ing. Preprint, arXiv:2501.12570.                          2024a. Tree of thoughts: Deliberate problem solving
+                                                             with large language models. Advances in Neural
+Xinyin Ma, Guangnian Wan, Runpeng Yu, Gongfan                Information Processing Systems, 36.
+   Fang, and Xinchao Wang. 2025. Cot-valve: Length-
+   compressible chain-of-thought tuning. Preprint,        Yao Yao, Zuchao Li, and Hai Zhao. 2024b. GoT: Effec-
+   arXiv:2502.09601.                                         tive graph-of-thought reasoning in language models.
+                                                             In Findings of the Association for Computational Lin-
+OpenAI. 2024.  Introducing openai o1-                        guistics: NAACL 2024, pages 2901–2921, Mexico
+                                                             City, Mexico. Association for Computational Lin-
+preview.       https://openai.com/index/                     guistics.
+
+introducing-openai-o1-preview/.                           Yi Zhao, Zuchao Li, and Hai Zhao. 2025a. Iam: Effi-
+                                                             cient inference through attention mapping between
+Rui Pan, Yinwei Dai, Zhihao Zhang, Gabriele Oliaro,          different-scale llms. In Proceedings of the 63rd An-
+   Zhihao Jia, and Ravi Netravali. 2025. Specreason:         nual Meeting of the Association for Computational
+   Fast and accurate inference-time compute via specu-       Linguistics (Volume 1: Long Papers), pages 19522–
+   lative reasoning. Preprint, arXiv:2504.07891.             19533.
+Yi Zhao, Zuchao Li, Hai Zhao, Baoyuan Qi, and Liu
+   Guoming. 2025b. Dac: A dynamic attention-aware
+   approach for task-agnostic prompt compression. In
+   Proceedings of the 63rd Annual Meeting of the As-
+   sociation for Computational Linguistics (Volume 1:
+   Long Papers), pages 19395–19407.
+
+Yi Zhao, Yajuan Peng, Cam-Tu Nguyen, Zuchao Li,
+   Xiaoliang Wang, Hai Zhao, and Xiaoming Fu. 2025c.
+   Smallkv: Small model assisted compensation of kv
+   cache compression for efficient llm inference. arXiv
+   preprint arXiv:2508.02751.
+
+Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Jeff
+   Huang, Chuyue Sun, Cody Hao Yu, Shiyi Cao, Chris-
+   tos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark
+   Barrett, and Ying Sheng. 2023. Efficiently program-
+   ming large language models using sglang. Preprint,
+   arXiv:2312.07104.
+A Detailed analysis of LRM Judgment                        C Statistics of Trigger Activation
+
+To further investigate the unreliability of the LRM-       To better understand the efficiency and contribution
+as-a-Judge mechanism in SpecReason, we conduct             of the three trigger mechanisms in TrigReason, we
+a fine-grained analysis of rejection behavior on           conduct a quantitative analysis of their activation
+the AIME24 benchmark. Specifically, we com-                frequencies and correlation with final task accuracy
+pare the step-level rejection rates of two conditions      on the AIME24 dataset.
+across all 30 questions: (1) the original SpecReason
+setup, where the LRM judges SRM-generated rea-                Table 2 reports the percentage of reasoning steps
+soning steps, and (2) an LRM-own control, where            that activate each trigger under various configura-
+the LRM judges its own reasoning trajectory gen-           tions of cognitive overload threshold ρ, priming
+erated during full LRM execution.                          steps n, and rectification steps m. We also include
+                                                           the corresponding final accuracy on AIME24 for
+   Figure 8 presents the per-question rejection rates      each setting.
+for both settings. Despite the semantic correct-
+ness of its own reasoning path, the LRM rejects               We find that the cognitive offload trigger is the
+its own steps at a rate comparable to that of              most frequently activated mechanism, accounting
+SRM-generated steps—indicating inconsistent and            for over 25% of all steps in most configurations.
+preference-driven judgment. On average, the LRM            The Intervention Request Trigger has a lower acti-
+rejects 53.4% of its own reasoning steps, only             vation rate but contributes significantly to perfor-
+slightly lower than the 56.8% rejection rate for           mance gains, enabling a performance jump from
+SRM steps. This high self-rejection rate suggests          23.33 to 29.6 accuracy when enabled (0.85-20-0 vs.
+that the LRM’s scoring mechanism is not grounded           0.85-20-1), despite being triggered in only 4.7%
+in logical validity, but rather in stylistic or strategic  of steps. Increasing trigger frequency generally
+preferences.                                               improves accuracy, but with diminishing returns
+                                                           when it’s close to LRM performance. For example,
+   This finding strongly supports our claim in Sec-        raising the cognitive offload threshold from 0.75 to
+tion 2.1: using the LRM as a judge introduces in-          0.85 reduces its activation by 12%, yet accuracy
+herent unreliability, as it cannot reliably distinguish    remains nearly unchanged.
+between valid reasoning variations and genuinely
+erroneous steps. Consequently, SpecReason may              D Overconfidence as a Sign of Cognitive
+reject correct SRM reasoning or accept flawed ones              Overload
+based on superficial alignment, undermining both
+efficiency and correctness.                                We analyze 160 reasoning trajectories from SRMs
+                                                           across 10 problems where SRMs and LRMs exhibit
+B Case Studies of Three Risk Patterns                      significant performance gaps. In this analysis, we
+                                                           identify 93 trajectories containing clearly incorrect
+To provide intuitive illustrations of the three key        reasoning steps. A striking pattern emerges: these
+risk patterns identified in Section 3.1, we present        erroneous steps frequently exhibit overconfidence.
+visual case studies on representative problems from        To quantify this, we compute the proportion of
+the AIME24 benchmark.                                      low-perplexity tokens (defined as tokens with per-
+                                                           token perplexity < 1.05) within each reasoning
+   • Figure 9 demonstrates the Path Divergence             step. Among the 93 trajectories with identifiable
+      Risk, where the SRM makes suboptimal pro-            errors, 88 (94.6%) contain steps where over 85% of
+      cedural choices that lead to intractable compu-      tokens are low-perplexity. In contrast, only 38.1%
+      tation, while the LRM adopts a more strategic        of all reasoning steps in the full set exceed this
+      formulation.                                         threshold.
+
+   • Figure 10 illustrates Cognitive Overload Risk:           This stark discrepancy suggests that high confi-
+      the SRM performs correctly for hundreds of           dence in SRM outputs is not indicative of correct
+      steps but fails at a critical late-stage computa-    or deep reasoning, but rather reflects a tendency to
+      tion due to arithmetic or attentional lapse.         fall back on memorized patterns from training data.
+                                                           We present representative examples in Table 4 and
+   • Figure 11 showcases Recovery Inability Risk,          Table 5, where seemingly confident steps lead to
+      where the SRM enters a loop of indecisive            incorrect conclusions despite low token-level per-
+      reasoning after hitting a bottleneck, failing to     plexity.
+      self-correct or switch strategies.
+$YHUDJH5HMHFWLRQ5DWH           6SHF5HDVRQ
+
+                                    /502ZQ
+
+                        
+
+                        
+
+                        
+
+                        
+
+                                                      
+
+                                                          3UREOHP,'
+
+Figure 8: Per-question rejection rates of SRM-generated steps (SpecReason) vs. LRM-generated steps (LRM-own)
+on AIME24. The LRM frequently rejects its own valid reasoning, revealing the inconsistency of its judgment.
+
+Table 2: Activation frequencies of triggers and corresponding accuracy on AIME24 dataset. All percentages are
+computed over total reasoning steps.
+
+Config (ρ-n-m) Cognitive Offload (%) Strategic Priming (%) Intervention Request (%) Total Trigger (%) AIME24 ACC
+
+0.75-20-1                    38.50           8.06     4.36  50.92                                                      30.0
+
+0.85-20-1                    25.95           8.31     4.73  38.99                                                      29.6
+
+0.95-20-1                    11.49           8.64     4.95  25.08                                                      26.25
+
+0.85-10-1                    26.41           4.23     4.87  35.51                                                      27.5
+
+0.85-20-0                    26.04           8.23     0.00  34.27                                                      23.33
+
+   We interpret this overconfidence as a symptom      manually curated this candidate set to retain only
+of cognitive overload: when faced with challeng-      those expressions that consistently convey hesita-
+ing reasoning junctures, the SRM fails to engage in   tion in context. We implement a case-insensitive
+exploratory or reflective thinking and instead gen-   regular expression matcher to identify such expres-
+erates superficially fluent but semantically shallow  sions in generated text. The full list of hesitation
+continuations, effectively giving up by defaulting    patterns is shown in Table 3.
+to familiar sequences. This behavior motivates our
+design of the Cognitive Offload Trigger in TrigRea-   F The Main Algorithm of TrigReason
+son, which detects such states and delegates to a
+more capable model before critical errors occur.      The main algorithm of TrigReason is shown in
+                                                      Algorithm 1.
+E Complete List of hesitation words
+                                                      G The Use of Large Language Models
+To operationalize the linguistic markers of Recov-
+ery Inability Risk, we define a set of hesitation     In this work, large language models are used exclu-
+words and phrases that indicate uncertainty, self-    sively to assist with language editing and clarifica-
+doubt, or backtracking in reasoning trajectories.     tion during the writing of this paper. All technical
+These patterns are used to detect when the SRM        ideas, method design, analysis, and experimental
+enters a state of semantic hesitation.                work are conducted by human authors.
+
+   The hesitation word list is derived through a
+two-stage analysis of 960 reasoning traces gener-
+ated by DeepSeek-R1-1.5B and Qwen3-0.6B on
+the AIME24 dataset. First, we identified reasoning
+steps exhibiting hesitation or stagnation by prompt-
+ing LRM like QwQ-32B. And then we performed
+n-gram frequency analysis and compiled a candi-
+date set of high-frequency patterns. Finally, we
+Algorithm 1 TrigReason
+
+Input: Question x, small reasoning model S, large reasoning model L, priming steps n, overload
+
+     threshold ρ, rectification steps m
+
+1: Initialize: y ← [ ], rectify_step ← 0, t ← 0
+
+2: while not finished do
+
+3: t ← t + 1
+
+4: if t < n then                                              ▷ Strategic Priming Trigger
+
+5:   yt ∼ pL(· | y<t, x)
+
+6: else
+
+7:       ytS, finished, ppl_ratiot ← GenerateStep(S, x, y<t)
+
+8:   if rectify_step > 0 or ppl_ratiot > ρ then            ▷ Cognitive Offload or Recovery Trigger
+
+9:             yt ∼ pL(· | y<t, x)
+
+10:            if ppl_ratiot <= ρ then
+
+11:            rectify_step ← rectify_step − 1
+
+12:            end if
+
+13:  else
+
+14:            yt ← ytS                                       ▷ Accept small model output
+
+15:            if Detect_hesitation(yt, yt−1, yt−2)) then
+
+16:            rectify_step ← m                               ▷ Intervention Request Trigger fires
+
+17:            end if
+
+18:  end if
+
+19: end if
+
+20: Append yt to y
+
+21: end while
+
+22: return y
+
+Output: Reasoning trajectory y, final answer
+                                       Table 3: List of hesitation words and phrases.
+
+                     Word/Phrase
+
+                     wait                         hmm                            debatable
+                     maybe                        perhaps                        could be
+                     might be                     possibly                       on the other hand
+                     alternatively                another possibility            or perhaps
+                     actually                     now that I think about it      I think I made a mistake
+                     let me reconsider            not sure                       I’m not entirely sure
+                     this might be wrong          I could be mistaken            unless I’m wrong
+
+             Table 4: Example of incorrect reasoning steps with corresponding perplexity ratios (ppl_ratio).
+
+Reasoning Step                                                                                                          ppl_ratio
+                              √                                                                                           0.955
+
+AP = sqrt[(1100² + (1000 14)²)/507²] = sqrt[(1,210,000 + 1,400,000)/507²] =
+
+sqrt[(2,610,000)/507²] = sqrt[2,610,000]/507.
+
+                                               b2        1
+                                           1 + m2 · 120 = 1
+
+So:                                                                                                                     0.916
+                                       b2 = 120(1 + m2)
+                                                                                                                        0.931
+Therefore,       b2  =  120(1  +  m2)  and   a2    =  120(1+m2  )  .                                                    0.872
+                                                        6−5m2                                                           0.863
+
+Simplify numerator and denominator:                                                                                     0.962
+
+50625÷25=2025, 22*325=7325.
+
+So, 2025/7325.
+
+Okay, so from n=1 to n=20, the losing positions (L) are:
+
+2, 5, 6, 10, 11, 15, 16, 20.
+
+Let me denote the diagonals as vectors d⃗1 and d⃗2, which are perpendicular. So, if the
+
+rhombus      is  centered  at  the  origin,  then  the   vertices  can  be  expressed   as   d⃗1  ,  d⃗2  ,  −  d⃗1  ,
+                                                                                             2       2          2
+        d⃗2
+and  −  2    .
+
+Finally,  when       her  walking   speed  is  s  +   1  =  3  km/h,  the  time  taken  is:
+                                                      2
+
+                                               9
+                                                 +t=3+t
+
+                                               3
+
+Since t = 4 − 3 = 1 hour, the total time is:
+
+                                             3 + 1 = 4 hours
+
+For the second scenario: - Walking speed: s + 2 km/h - Total time: 2 hours and 24                                       0.960
+minutes = 144 + 24 = 168 minutes - Time in the coffee shop: t minutes - Walking
+time: 168 − t minutes
+          Table 5: Example of incorrect reasoning steps with corresponding perplexity ratios (ppl_ratio).
+
+Reasoning Step                                                                             ppl_ratio
+Subtracting Equation 1 from Equation 2:                                                      0.974
+
+                           540 540
+                                 − = 144 − 240 = −96
+
+                          s+2 s
+
+                                             11
+                                 540         − = −96
+                                          s+2 s
+
+                                    540      −2          = −96
+
+                                          s(s + 2)
+
+                                           1080
+                                                    = −96
+
+                                         s(s + 2)
+
+          V = (sqrt((a + b − c)(a + c − b)(b + c − a)))/(6 ∗ sqrt(2))                      0.952
+
+I can eliminate t and find the value of s:
+
+                                         99
+                                          −         = 1.6
+                                         s s+2
+
+Simplifying this, I get:                     18                                            0.876
+Solving for s, I find:                               = 1.6
+
+                                          s(s + 2)
+                                            s = 5 km/h
+
+Finally,  when  walking   at  s  +  1  =  3  km/h,  the  time  taken  for  the  walk  is:
+                                    2
+
+                                 9                                                         0.935
+                                   = 3 hours = 180 minutes
+
+                                 3
+
+n | Outcome (Winning or Losing for Alice) —|— 1 | Winning (Alice takes 1) 2 |              0.929
+Losing (Alice leaves Bob with 1) 3 | Winning (Alice takes 1, leaving 2 for Bob) 4 |
+Winning (Alice takes 4) 5 | Losing (Alice leaves Bob with 4 or 1) 6 | Losing (Alice
+leaves Bob with 5 or 2) 7 | Winning (Alice leaves Bob with 6 or 3) 8 | Winning
+(Alice leaves Bob with 7 or 4) 9 | Losing (Alice leaves Bob with 8 or 5) 10 | Losing
+(Alice leaves Bob with 9 or 6) 11 | Winning (Alice leaves Bob with 10 or 7) 12 |
+Winning (Alice leaves Bob with 11 or 8) 13 | Losing (Alice leaves Bob with 12 or 9)
+14 | Losing (Alice leaves Bob with 13 or 10) 15 | Winning (Alice leaves Bob with 14
+or 11)...
+  Path Divergence Risk
+
+  Question (AIME24-61):
+  Let $ABC$ be a triangle inscribed in circle $\omega$. Let the tangents to $\omega$ at $B$ and $C$
+  intersect at point $D$, and let $\overline{AD}$ intersect $\omega$ at $P$. If $AB=5$, $BC=9$, and
+  $AC=10$, $AP$ can be written as the form $\frac{m}{n}$, where $m$ and $n$ are relatively prime
+  integers. Find $m + n$.
+
+SRM Answers:
+Alright, so I have this geometry problem here. Let me try to visualize it first. There's a triangle ABC
+inscribed in a circle ω. The tangents at points B and C intersect at point D. Then, the line AD intersects the
+circle ω again at point P. I know the lengths of the sides: AB is 5, BC is 9, and AC is 10. I need to find AP
+expressed as a fraction m/n where m and n are coprime, and then compute m + n.
+
+Hmm, okay. Let me recall some geometry concepts that might help here. Since AD intersects the circle
+again at P, maybe I can use power of a point or some properties of cyclic quadrilaterals. Also, since D is the
+intersection of the tangents at B and C, D must be the ex-pole or something related to the circumcircle.
+
+Wait, tangents from a common external point are equal in length. So, DB equals DC. That might be useful.
+Also, since ABC is inscribed in ω, maybe I can use properties of cyclic quadrilaterals or intersecting chords.
+
+I remember that the power of point D with respect to ω is equal to DB², since DB is tangent to ω at B.
+Similarly, it's also equal to DC²because DC is tangent at C. So, DB = DC.
+
+Now, since AD intersects ω again at P, perhaps I can apply the power of point A with respect to ω. The
+power of A would be equal to AP * AD. Also, the power of A can be expressed as AB * AC because A is
+outside the circle and AB and AC are the secant segments from A to the circle.
+
+Wait, is that right? Let me think. The power of a point outside a circle is equal to the product of the lengths
+of the segments from the point to the points of intersection with the circle. So, for point A, the power with
+respect to ω is AB * AC because AB and AC are the two secant segments from A to points B and C on the
+circle. But actually, in this case, A is connected to P, which is another point on the circle. So, AP * AD
+should equal AB * AC.
+……
+Wait, maybe using Ceva's theorem or Menelaus' theorem. But without knowing certain angles or lengths, it's
+difficult.
+
+Wait, maybe I can compute the coordinates. Let me set up coordinate system.
+
+Let me place triangle ABC in coordinate plane. Let me assign coordinates to points A, B, C. Let me let
+point A be at (0, 0), point B at (5, 0), and point C somewhere in the plane. Wait, but I don't know the
+coordinates yet.
+
+  Comment:
+  While placing $A$ at $(0,0)$ and $B$ at $(5,0)$ is mathematically valid, this coordinate system leads to
+  significantly more complex algebraic expressions in subsequent steps—such as solving for the circumcircle,
+  computing tangent lines, and finding intersection points—making it extremely difficult to reach the correct
+  solution within the token budget. This illustrates a key aspect of path divergence risk: even when an SRM
+  follows a logically sound high-level strategy, suboptimal procedural choices (e.g., coordinate placement)
+  can lead to intractable computational paths. In contrast, we observe that LRMs frequently adopt a more
+  strategic setup—placing $B$ at $(0,0)$ and $C$ at $(9,0)$—which aligns the base $BC$ with the x-axis
+  and leverages the known side length $BC = 9$ as a natural coordinate anchor. This choice dramatically
+  simplifies symmetry and distance calculations, reducing reasoning complexity and increasing the likelihood
+  of success. The SRM’s failure to anticipate such downstream computational consequences highlights its
+  limited global planning capability, motivating the need for strategic priming (e.g., via the Strategic Priming
+  Trigger in TrigReason) to guide early critical decisions.
+
+                           Figure 9: Case study of Path Divergence Risk.
+    Cognitive Overload Risk
+
+  Question (AIME24-61):
+  Let $ABC$ be a triangle inscribed in circle $\omega$. Let the tangents to $\omega$ at $B$ and $C$
+  intersect at point $D$, and let $\overline{AD}$ intersect $\omega$ at $P$. If $AB=5$, $BC=9$, and
+  $AC=10$, $AP$ can be written as the form $\frac{m}{n}$, where $m$ and $n$ are relatively prime
+  integers. Find $m + n$.
+
+SRM Answers1:
+……
+Let me place triangle ABC in the coordinate plane. Let me assign coordinates to the points A, B, and C. Let
+me assume point B is at (0,0), point C is at (9,0), since BC is 9 units. Then, point A is somewhere in the
+plane such that AB = 5 and AC = 10.
+Let’s set B at (0,0). Let’s set C at (9,0). Let’s let A be at (x,y). Then, the distance from A to B is 5, so
+sqrt((x)^2 + (y)^2) = 5, so x^2 + y^2 = 25.
+……
+(1/3)^2 + y^2 = 25 => 1/9 + y^2 = 25 => y^2 = 25 - 1/9 = 225/9 - 1/9 = 224/9 => y = sqrt(224/9) =
+(sqrt(224))/3 = (2*sqrt(56))/3 = (2*2*sqrt(14))/3 = 4*sqrt(14)/3.
+So, coordinates of A are (1/3, 4√14/3).
+……
+Thus, the equation of circle ω is:
+x^2 + y^2 - 9x - (33√14/28)y = 0.
+……
+So, the tangent at C is 84x - 11√14 y - 756 = 0.
+Now, we have the equations of the two tangents:
+Tangent at B: 84x + 11√14 y = 0.
+Tangent at C: 84x - 11√14 y - 756 = 0.
+We can solve these two equations to find the coordinates of point D.
+……
+Therefore, power of D: DB^2 = DA * DP => (225/22)^2 = (325/22) * DP.
+So, solve for DP:
+50625 /22 /325 = (50625 /22) * (1/325) = (50625 / (22*325)).
+Simplify numerator and denominator:
+50625 ÷25=2025, 22*325=7325.
+So, 2025 /7325.
+……
+============================================================================
+SRM Answers2:
+……
+AP = sqrt[(1100² + (1000√14)²)/507²] = sqrt[(1,210,000 + 1,400,000)/507²] = sqrt[(2,610,000)/507²] =
+sqrt[2,610,000]/507.
+……
+
+Comment:
+We observe a hallmark of cognitive overload risk: the SRM performs correctly over hundreds of reasoning
+steps but fails at a single, critical computation late in the process—often due to arithmetic fatigue or
+attention drift under long context. The two examples above illustrate this phenomenon starkly. In the first
+case, after correctly deriving $DP = 50625 / (22 \times 325)$, the SRM attempts to simplify by dividing
+both numerator and denominator by 25, but erroneously applies the division only to the numerator ($50625
+\div 25 = 2025$), leaving the denominator unmodified. This inconsistent operation breaks the equality and
+invalidates the result. In the second case, the model correctly sets up the expression for $AP$ and is very
+close to the final correct result, but during the final computation of $(1000\sqrt{14})^2$, it computes
+$1,400,000$ instead of the correct $14,000,000$—a single-digit error (missing a zero) that nullifies
+hundreds of prior correct steps. Both failures occur not from flawed logic, but from transient computational
+lapses under cognitive strain. This supports our design of the Cognitive Offload Trigger, which monitors
+confidence and irregularity in intermediate computations to proactively offload high-risk steps before such
+errors occur.
+
+                        Figure 10: Case study of Cognitive Overload Risk.
+    Recovery Inability Risk
+
+Question (AIME24-61):
+Let $ABC$ be a triangle inscribed in circle $\omega$. Let the tangents to $\omega$ at $B$ and $C$
+intersect at point $D$, and let $\overline{AD}$ intersect $\omega$ at $P$. If $AB=5$, $BC=9$, and
+$AC=10$, $AP$ can be written as the form $\frac{m}{n}$, where $m$ and $n$ are relatively prime
+integers. Find $m + n$.
+
+SRM Answers:
+……
+Thus, AP= (1,292,735 /1,084,519)*(sqrt(68,324,697)/1188).
+Wait, but that seems messy.
+Wait, perhaps another approach. Since P lies on AD, and we have the coordinates of D, which is (7441/1188,
+481 sqrt(14)/594), and P is beyond D, so P is a scalar multiple of AD beyond D.
+Thus, vector AD is D - A= (7441/1188, 481 sqrt(14)/594).
+Thus, P= D + k*(D - A), where k>0.
+But perhaps this is not helpful.
+Alternatively, since we have the coordinates of P as:
+x= (1,292,735 /1,084,519)*(7441/1188)= (1,292,735 *7441)/(1,084,519 *1188).
+Similarly, y= (1,292,735 /1,084,519)*(481 sqrt(14)/594)= (1,292,735 *481 sqrt(14))/(1,084,519 *594).
+But this seems too cumbersome. Maybe we can find the ratio t=1,292,735 /1,084,519.
+But 1,292,735 ÷5=258,547.
+1,084,519 ÷5=216,903.8, which is not integer. So, maybe t is already in simplest terms.
+Alternatively, maybe we can rationalize AP.
+But perhaps it's better to recall that AP= t*AD.
+……
+But we need AP in exact terms.
+Alternatively, perhaps we can find AP as the length from A to P, which is beyond D on AD.
+But without knowing the exact coordinates, it's difficult.
+Alternatively, perhaps we can use power of a point.
+Wait, another idea: since A is on the circumcircle, and AD is a secant. So, power of A with respect to ω is
+zero, as A is on ω.
+But perhaps using power of point P with respect to ω.
+Power of P: PA * PD = PB * PC.
+But since P is on AD, which is a secant, and also, P is on the circumcircle ω.
+Wait, no, P is on ω, so PA * PD=0, but that doesn't help.
+Alternatively, since P is the intersection of AD with ω, and D is the other intersection point, so PA * PD=
+power of A with respect to ω, but A is on ω, so power is zero, which again PA * PD=0, which only tells us
+that either PA=0 or PD=0, which isn't helpful.
+Wait, perhaps it's better to consider triangle ABD and power of point.
+Wait, point P lies on AD and on ω. So, PA * PD= power of A with respect to ω. But since A is on ω, power
+is zero, so PA * PD=0. So, either PA=0 or PD=0, which is trivial.
+So, that approach doesn't help.
+Alternatively, since A is on ω, and AD is a secant through D, then power of D with respect to ω is equal to
+DA * DP= DB * DC.
+Wait, yes, that's the power of a point theorem.
+……
+
+Comment:
+A key strength of advanced reasoning models is their ability to self-reflect, backtrack, and recover from
+incorrect paths—often through iterative hypothesis testing and strategic redirection. However, we observe
+that SRMs frequently lack this recovery capability, leading to what we term Recovery Inability Risk. As
+shown in the example, after hitting a reasoning bottleneck, the SRM begins to generate repetitive, indecisive
+patterns marked by phrases like“Alternatively,”“perhaps,” and“Wait”, indicating uncertainty and failed
+hypothesis generation. Rather than backtracking to a valid state or switching to a fundamentally different
+strategy, the model loops in a state of semantic hesitation, unable to escape the flawed trajectory. In contrast,
+LRMs typically detect such stagnation and invoke insights to break the deadlock. This fundamental
+disparity motivates the Intervention Request Trigger in TrigReason, which identifies linguistic and structural
+markers of stagnation and requests timely LRM intervention to reset and redirect the reasoning process.
+
+                        Figure 11: Case study of Recovery Inability Risk.
+

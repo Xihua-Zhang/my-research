@@ -1,0 +1,1287 @@
+                                        RecurTrace: Adaptive Latent Reasoning with Loop-Time Memory
+
+                                        Yuxiang Wang1  Kunyu Feng1 Yingda Shen1 Haoning Xu4 Junyu Wang5                                                    Zhizheng Wu1,2,3
+
+                                                                       1The Chinese University of Hong Kong, Shenzhen
+                                                              2Shenzhen Loop Area Institute 3Amphion Technology Co., Ltd.
+
+                                                                 4The Chinese University of Hong Kong 5Tianjin University
+
+                                                                           yuxiangwang1@link.cuhk.edu.cn
+
+arXiv:2609.03379v3 [cs.LG] 19 Oct 2026                                Abstract                                     RecurTrace               TaH-Mismatch            LoopUS-Conf
+                                                                                                                   CALM margin              CALM top-prob           ACT / PonderNet
+                                           Repeating a small block of middle layers increases a language
+                                           model‚Äôs effective inference depth without adding parameters      loops                                                   56.92            Œî vs fixed
+                                           or generating extra tokens, and recent work shows that this      2.04
+                                           latent recurrence improves reasoning. However, two design        2.12   RecurTrace, fixed depth                   55.67                   +2.21
+                                           choices limit these gains. Each iteration sees only the previ-   3.21    peak 54.71                            55.25                      +0.96
+                                           ous output and cannot directly access earlier computations.      5.63                                                                     +0.54
+                                           Moreover, a fixed loop count wastes depth on easy inputs         4.15                                   54.12                             -0.59
+                                           while leaving hard ones with too little computation. We in-      1.00                                                                     -1.67
+                                           troduce RecurTrace1, which addresses both limitations using             1 2 4 8 16               53.04                                    -4.75
+                                           the loop‚Äôs own trajectory. Specifically, Loop Memory Atten-
+                                           tion lets each looped layer attend to its own states from pre-              loops (log2)
+                                           vious iterations along the loop-time axis, so the model can
+                                           revisit earlier computations instead of relying on the latest           49.96
+                                           state alone. A halting head then reads the loop state and pre-
+                                           dicts whether to continue, with supervision from an oracle that                                                fixed-depth peak (54.71%)
+                                           identifies when additional depth still reduces loss. In a con-
+                                           trolled MathQA comparison on the same looped backbone,                  50                52            54      56
+                                           RecurTrace achieves 56.9% accuracy with an average of 2.0
+                                           loops, exceeding the best fixed loop depth by 2.2 points at                               MathQA accuracy (%)
+                                           matched compute. By comparison, ACT and PonderNet col-
+                                           lapse to one loop, and CALM reaches only 54.1% with 5.6          Figure 1: MathQA accuracy versus mean loop count by halt-
+                                           loops, while the stronger LoopUS-Conf and TaH-Mismatch           ing method (1.7B, 3 training √ó 8 evaluation seeds). Points are
+                                           baselines reach 55.3% at 3.2 loops and 55.7% at 2.1 loops.       means ¬±1 SD across training seeds; the dashed line marks
+                                           Finally, RecurTrace improves generation accuracy over same-      the best fixed depth (54.71%). RecurTrace reaches 56.92%
+                                           budget fine-tuned baselines at 0.6B, 1.7B, 4B, and 8B, with      at ‚àº2 loops, 1.25 points above TaH-Mismatch. Inset: fixed-
+                                           the gain growing with model size from 0.6 to 3.4 points.         depth accuracy peaks at 2 loops.
+
+                                                           1 Introduction                                   re-runs the same layers on their own output and passes for-
+                                                                                                            ward only a single hidden state. Whatever an earlier iteration
+                                        A transformer spends the same number of layers on an easy           computed must fit into that state or be overwritten by later
+                                        question and on a hard one. This is convenient for training         passes. A loop that cannot consult its own past cannot reason
+                                        but wasteful at inference. Reasoning quality scales with ef-        across iterations. The second problem is that the loop cannot
+                                        fective depth, whether the depth comes from stacking more           budget. Looped models fix the iteration count for the whole
+                                        layers, from spelling out a chain of thought in tokens (Wei         dataset, so an easy question gets as many loops as a hard
+                                        et al. 2022), or from iterating a block of layers in latent space   one. Figure 1 shows the cost. On MathQA, a 1.7B looped
+                                        (Saunshi et al. 2025; Geiping et al. 2025). Among these             model peaks at two loops with 54.7% accuracy, stays near
+                                        routes, latent looping increases effective depth without emit-      53.6% at the eight-loop training clamp, and falls to 47.5% at
+                                        ting additional reasoning tokens. It adds depth at inference        sixteen. More loops soon stop helping and then hurt, so no
+                                        without new parameters or longer outputs, and it leaves the         fixed budget suits every input.
+                                        tokenizer and the decoding loop unchanged.
+                                                                                                               For the memory problem, two concurrent efforts attach
+                                           Two problems keep latent looping from delivering on this         external stores to looped language models, gated key-value
+                                        promise. The first is that the loop forgets. A looped block         banks in Frey et al. (2026) and a multi-slot buffer with read-
+                                                                                                            write routers in MeSH (Yu et al. 2025), each adding extra
+                                            1Code: https://github.com/JensenYX/RecurTrace                   parameters and a learned read-write mechanism. For bud-
+                                                                                                            geting, Adaptive Computation Time (ACT) (Graves 2016)
+                                                                                                            and PonderNet (Banino, Balaguer, and Blundell 2021) halt
+                                                                                                            under a compute penalty or a geometric prior, confidence
+rules such as CALM (Schuster et al. 2022) exit once an in-          likelihood gains over same-budget baselines.
+termediate state looks certain, and Mixture-of-Recursions
+gives each token its own recursion depth but trains its routers                    2 Related Work
+from scratch (Bae et al. 2025). On a pretrained model whose
+block is looped, a penalty on extra loops makes halting stop     Looped and recurrent-depth transformers. Reusing lay-
+too early, and a confidence threshold makes it stop too late.    ers to add depth without new parameters dates to the Univer-
+                                                                 sal Transformer (Dehghani et al. 2019), weight-tied models
+   Our starting point is that the loop already produces ev-      such as ALBERT (Lan et al. 2020), and deep equilibrium
+erything both problems require, so no outside machinery is       models (Bai, Kolter, and Koltun 2019). It pays off for rea-
+needed. The states it computed on earlier passes are a ready-    soning, where Saunshi et al. (2025) show a looped k-layer
+made memory, and the state it holds now carries evidence         block can rival a kL-layer network, Geiping et al. (2025)
+about whether another pass will change the answer. There-        sample the iteration count to reach deeper unrolls, and Zhu
+fore, we propose RecurTrace, which converts a pretrained         et al. (2025) pretrain looped models at scale. Encode-Think-
+Qwen3 model (Yang et al. 2025) into a memory-augmented           Decode (Koishekenov, Lipani, and Cancedda 2026) re-runs
+looped reasoner with learned halting. For the forgetting prob-   a pretrained middle block, and CoTFormer (Mohtashami,
+lem, we give every looped layer a Loop Memory Attention          Pagliardini, and Jaggi 2025) interleaves looped and fresh rep-
+module. Along a loop-time axis, each token attends from its      resentations. Plain-looping approaches pass only the previ-
+current state to its own states from previous loops, so a layer  ous output between iterations and keep no addressable record
+can read what it computed one or two iterations earlier. The     of intermediate states. RecurTrace adds that record and reads
+module sits beside the existing self-attention, adds few pa-     it with attention along the loop-time axis. Dreamer (Knupp
+rameters, and mixes no information across token positions,       et al. 2026) also attends along depth in a recurrent sparse-
+so it cannot leak future tokens. For the budgeting problem,      expert architecture, whereas RecurTrace grafts its loop-time
+we train a halting head that reads the loop state and predicts   read and halting onto a frozen dense model.
+whether a deeper loop will still help. Its supervision comes
+from an oracle that records, for each training example, the         External stores sit outside the recurrence, including the
+depth at which the answer stops improving, a measured target     gated memory banks of Frey et al. (2026) and the multi-slot
+used directly, with no added compute penalty or confidence       buffer of MeSH (Yu et al. 2025). DiscoLoop (Fu et al. 2026a)
+proxy. At inference the model loops until the head says stop,    and PonderLM (Zeng et al. 2026) instead feed re-encoded
+so depth is set per input rather than fixed across the dataset.  predictions back into the loop. RecurTrace keeps the block
+                                                                 weight-tied and adds no store, querying only the trajectory
+   The memory and the halting head need each other. Without      the recurrence already produced. The concurrent LoopUS
+the memory, extra loops barely help, so the halting head gains   (Park et al. 2026) likewise recasts a pretrained model into
+little by running an input longer. Without the halting head,     encode-think-decode blocks with a selective gate, keeps no
+every input gets the same number of loops, so the extra          addressable history, and exits on a confidence rule we find
+loops the memory makes useful are wasted on easy inputs          overspends the loop budget.
+and denied to hard ones. Figure 1 previews the outcome on
+MathQA. RecurTrace reaches 56.9% at 2.0 loops, improving         Adaptive computation and early exit. Adaptive Compu-
+on the best fixed loop budget by 2.2 points at a comparable      tation Time (Graves 2016) accumulates a stopping probabil-
+mean depth and beating every adaptive-compute baseline           ity, and PonderNet (Banino, Balaguer, and Blundell 2021)
+we test, including the recent LoopUS (Park et al. 2026) and      halts under a geometric prior over steps. For pretrained mod-
+Think-at-Hard (Fu et al. 2026b).                                 els, depth-adaptive decoding (Elbayad et al. 2020), Dee-
+                                                                 BERT (Xin et al. 2020), and CALM (Schuster et al. 2022)
+   RecurTrace is also practical to adopt. All base weights       exit early once a layer is confident, while Mixture-of-Depths
+stay frozen, the added modules hold at most about 2.2% of        (Raposo et al. 2024) spends each layer on only some tokens.
+the parameters, and they start out nearly inactive, so a single  Mixture-of-Recursions adapts the recursion depth per token
+loop reproduces the pretrained model exactly, a safe floor that  with scratch-trained routers (Bae et al. 2025), and Think-at-
+more loops build on. Across 0.6B, 1.7B, 4B, and 8B, Recur-       Hard (Fu et al. 2026b) iterates only tokens predicted wrong
+Trace raises generation accuracy over same-budget baselines      after one pass. We instead adapt how often the looped block
+at every scale, with the gain growing to 3.4 points at 8B, and   repeats, halt per sequence, and supervise the head with an
+lowers teacher-forced loss at all four. Our contributions are:   oracle marking whether a deeper loop lowers the loss, not
+                                                                 with a prior, penalty, confidence, or token-mismatch rule, so
+ ‚Ä¢ Loop Memory Attention. An attention along the loop-           it asks when added depth pays off for the sequence rather
+   time axis through which every token reads its own states      than whether one token was wrong.
+   from earlier loops. The looped block stays fully weight-
+   tied and carries no external memory store.                    Scaling test-time compute. Chain-of-thought prompting
+                                                                 (Wei et al. 2022), self-consistency (Wang et al. 2023), and
+ ‚Ä¢ Oracle-distilled halting. A sequence-level halting head       adaptive test-time scaling (Zhai et al. 2026) use extra decod-
+   supervised by whether a deeper loop still lowers the loss,    ing compute; reinforcement learning trains reasoning models
+   not by a prior, penalty, or confidence rule. It matches or    (Zhang et al. 2025). A complementary line stays latent, ap-
+   exceeds the best fixed depth across six tasks.                pending pause tokens (Goyal et al. 2024) or feeding hidden
+                                                                 states back as continuous thoughts (Hao et al. 2025; Wei et al.
+ ‚Ä¢ One model for every depth. One trained model serves
+   every test-time loop depth, not one model for each budget,
+   and the recipe holds from 0.6B to 8B with accuracy and
+Loop Memory Attention (LMA)                                                  Training Process              Looped Thinking Core
+
+                                                                                         Frozen            Ì†µÌ±° = 1 Ì†µÌ±° = 2                 Ì†µÌ±° = T                      Frozen
+                                                                                        Encoder                                                                     Decoder
+                                                      token-level attention                                     s          s             s               Halting
+                                                            Layer s                        Layer                                                          Head          Layer
+Loop 1                                                                       Input      0 ‚Ä¶ (Ì†µÌ±† ‚àí 1)            s+1 s+1                  s+1                       Ì†µÌ±† + Ì†µÌ±ò ‚Ä¶ (Ì†µÌ∞ø ‚àí 1)  Answer
+Loop 2                                          Ì†µÌ±° = 2
+Loop 3                                          Ì†µÌ±° = 3
+Loop 4
+                                                Ì†µÌ±° = 4
+                                                                                                                              ‚Ä¶Ì†µÌ∞ãÌ†µÌ∞åÌ†µÌ∞ÄÌ†µÌ≤îs+k-1 s+k-1s+k-1
+                                                                                                                 ‚Ä¶Input r"#
+                                                                                                       ‚Ä¶‚®Å LÌ†µÌ±éÌ†µÌ±¶Ì†µÌ±íÌ†µÌ±ü$
+
+      ‚Ä¶
+                                                                                Training:  Easy sample             Loop 1     Loop 2             HALT                    Inference:
+                                                                             random depth  Hard sample             Loop 1     Loop 2             Loop 3
+                                                                                                                                                                         adaptive depth
+
+                                                                                                                                                         Loop 4    HALT  per sample
+
+Loop T  Sliding window                          Loop 1 Identify 3, 4, 5
+             Ì†µÌ±ä = 3                             Loop 2 4√ó5 = 20
+                                                Loop 3 3√ó20 = 60
+Example:                                        Loop 4 Verify                 Training:                Halting     Ì†µÌ±ÄÌ†µÌ±¢Ì†µÌ±ôÌ†µÌ±°Ì†µÌ±ñ Ì†µÌ±ëÌ†µÌ±íÌ†µÌ±ùÌ†µÌ±°‚Ñé   whether        continue            Inference:
+ 3 Ì†µÌ±°Ì†µÌ±üÌ†µÌ±éÌ†µÌ±¶Ì†µÌ±† √ó 4 Ì†µÌ±èÌ†µÌ±úÌ†µÌ±•Ì†µÌ±íÌ†µÌ±†√ó 5 Ì†µÌ±†Ì†µÌ±°Ì†µÌ±éÌ†µÌ±üÌ†µÌ±† = ?                               multi depth                Head          {1, 2, ‚Ä¶ }         continue?         stop          whether continue
+
+                                                                                                                                                                            at this depth
+
+Figure 2: RecurTrace architecture. A frozen encoder feeds a weight-tied block that recurs to variable depth, re-injecting its
+input after the first loop. Before each looped layer, Loop Memory Attention reads same-position states from a three-loop sliding
+window. Random-depth training supports multiple depths, while an oracle-distilled halting head predicts whether another loop
+will help, allocating more computation to hard inputs. After halting, the remaining frozen layers generate the answer.
+
+2025). Latent looping scales per-token computation without                                            Algorithm 1 Difficulty-adaptive looped inference
+emitting tokens, and RecurTrace asks how to make each loop
+count and when to stop.                                                                               Input tokens, with budget Tmax, floor Tmin, and threshold œÑ
+                                                                                                      Output next-token distribution
+
+                                                                                                       1: h ‚Üê encode the input through layers 0..s‚àí1, then set e ‚Üê h
+
+                      3 Method                                                                         2: for t = 1 to Tmax do
+
+RecurTrace starts from a pretrained LLM with L trans-                                                  3: if t > 1 then h ‚Üê h + Œ± RMSNorm(e) (input injection)
+former layers, where layer ‚Ñì maps a hidden state h to
+layer‚Ñì(h). We designate a contiguous block of k middle lay-                                            4: for ‚Ñì ‚àà B do
+ers, B = {s, . . . , s+k‚àí1}, as a looped thinking block and                                                        if t > 1 then h ‚Üê h + LMA‚Ñì(x(‚Ñìt‚àí1), M‚Ñì(t))
+repeat it T times at inference. The layers before the block                                            5:
+act as an encoder and the layers after it as a decoder, follow-
+ing the encode-think-decode view (Koishekenov, Lipani, and                                             6:          h ‚Üê layer‚Ñì(h), then store x(‚Ñìt) ‚Üê h in M‚Ñì
+Cancedda 2026). Figure 2 shows the design. Three ingredi-
+ents make the loop useful. A memory carries information                                                7: end for
+across iterations, variable-depth training exposes the model
+to many depths, and a halting head picks the depth per input.                                          8: pt ‚Üê œÉ(w‚ä§pool(h) + b)                                    (continue probability)
+
+                                                                                                       9: if t ‚â• Tmin and pt < œÑ then break (easy input, stop early)
+
+                                                                                                      10: end for
+
+                                                                                                      11: return decode h through layers s+k..L‚àí1 and the LM head
+
+Choosing the looped block. We place the block where it-                                               (Geiping et al. 2025), a device with roots in the deep-thinking
+erating helps most. Following the angular-distance probe of                                           and recall networks of Schwarzschild et al. (2021) and Bansal
+Koishekenov, Lipani, and Cancedda (2026), we first locate                                             et al. (2022). Inside the loop, before applying each block layer
+the broad middle span whose representations move least be-                                            we add a memory term and then run the unchanged layer,
+tween adjacent layers, the span that behaves most like a fixed
+point, and then pick a compact three-layer window inside it                                                                   h ‚Üê h + LMA‚Ñì x(‚Ñìt‚àí1), M‚Ñì(t) ,                               (2)
+by behavioral ablation. This yields layers 12‚Äì14 for the 28-
+layer 0.6B and 1.7B Qwen3 bases and layers 15‚Äì17 for the                                                           x(‚Ñìt) ‚Üê layer‚Ñì(h),                                                     (3)
+36-layer 4B and 8B ones. Probe-core and late-block controls
+are comparable or weaker (Appendix B).                                                                where M‚Ñì(t) = {x(‚Ñìt‚Ä≤) | max(1, t‚àíW ) ‚â§ t‚Ä≤ ‚â§ t‚àí1} is
+                                                                                                      a sliding window of the layer‚Äôs own outputs from up to W
+
+Looped computation. Let e be the block input, the output                                              earlier loops. On the first loop M‚Ñì is empty, so LMA‚Ñì returns
+of layer s‚àí1. We write x(‚Ñìt) for the state produced by layer ‚Ñì                                        zero, and at initialization T =1 reproduces the base model.
+on loop t. Each loop after the first begins by re-injecting the
+block input,                                                                                          Loop Memory Attention. The memory term in Eq. (2)
+                                                                                                      is an attention over the loop-time axis. For a query state
+        h ‚Üê h + Œ± RMSNorm(e),                                                       (1)               q = x(‚Ñìt‚àí1) and a window of m past states stacked as X,
+                                                                                                      we normalize both, form per-head queries, keys, and values
+with a scalar Œ± initialized to zero in the ReZero style (Bach-                                        Q, K, V with QK-normalization, and for every token position
+lechner et al. 2021), so injection starts as a no-op. Re-                                             attend across the m loop slots,
+injecting the input anchors the recurrence as depth grows
+                                                                                                                   Ai,j = softmaxj               Q‚àö‚ä§i Ki,j        ‚àí Œ≤h (t ‚àí tj)        ,  (4)
+                                                                                                                                                     dh
+LMA‚Ñì(q, X) = Œ≥ ¬∑ g ‚äô  j Ai,j Vi,j iWo . (5)                       Scale  L   dmodel  Loop block  Training
+
+The term ‚àíŒ≤h(t ‚àí tj) is a relative loop-distance bias with        0.6B   28  1024    layers 12‚Äì14 loop modules
+a free, signed, learnable per-head slope Œ≤h, initialized to
+ALiBi values (Press, Smith, and Lewis 2022). Because the          1.7B   28  2048    layers 12‚Äì14 loop modules
+bias depends only on how many loops ago a state was written,
+the module extrapolates to more loops than it saw in training.    4B     36  2560    layers 15‚Äì17 loop modules
+The attention runs along loop time only and never mixes
+token positions, so it adds no path for future tokens to leak     8B     36  4096    layers 15‚Äì17 loop modules
+into the present. A scalar gate Œ≥ and a token-wise gate g =
+œÉ(MLP([q, X])), where X is the mean of the memory, let            Table 1: Per-scale models. L is the number of base layers and
+the model close the memory on inputs that do not need it and      dmodel the hidden size. Every scale freezes the base and trains
+open it on inputs that do. The combined gate starts near zero,    only the loop, memory, injection, and halting parameters,
+so the memory path opens gradually during training. Reading       with per-scale training schedules in Appendix A.
+the past through attention, rather than through an external
+buffer, also keeps the additions close to the pretrained model.   checkpoint, freeze the base weights, and train only the loop,
+The block stays weight-tied, no slot routing is learned, and the  memory, injection, and halting parameters. Every compar-
+sliding window caps the cost of remembering at a constant.        ison is against a no-loop baseline under a matched budget
+                                                                  of steps, tokens, data, and hardware. Because the baseline
+Variable-depth training. We do not fix the loop count dur-        fine-tunes the full model while RecurTrace adds at most
+ing training. On each forward pass we draw T from a clamped       about 2.2% trainable parameters, any budget mismatch fa-
+log-normal Poisson distribution (Geiping et al. 2025), which      vors the baseline. The training mixture holds about 1.15 mil-
+places most mass at small depths but keeps a heavy tail of        lion direct-answer examples combining synthetic generators
+deep unrolls, and we apply the language-model loss at the         with real math, multi-hop question answering, and controlled
+sampled depth. The realized distribution has a mean depth         logic (Appendix A). Since every target is a short final answer,
+near 3.9, and about a fifth of passes run six or more loops       test-time loops add latent computation rather than output to-
+(Appendix D). This single change lets one trained model           kens. We evaluate a train-covered reasoning suite of 14 tasks
+serve any test-time depth and extrapolate beyond the depths       including GSM8K (Cobbe et al. 2021), MATH (Hendrycks
+it trained on. All loop parameters are added to the pretrained    et al. 2021b), and MathQA (Amini et al. 2019), and a clas-
+weights, and the nearly closed gates keep the model close to      sic suite of eight general benchmarks including ARC (Clark
+its starting point early in training.                             et al. 2018), HellaSwag (Zellers et al. 2019), and MMLU
+                                                                  (Hendrycks et al. 2021a), reporting greedy-decoding genera-
+Difficulty-adaptive halting. To decide how deep to go, we         tion accuracy and teacher-forced NLL (nats, lower is better).
+add a lightweight halting head. After loop t we pool the          BIG-Bench Hard (Suzgun et al. 2023) is diagnostic only.
+block state over prompt positions into a vector zt and predict
+a continue probability pt = œÉ(w‚ä§zt + b). We supervise it by          We run the controlled adaptive-halting comparison on
+distilling an oracle that reads the same forward pass. Let Lt     MathQA at 1.7B, the setting with the most room for adap-
+be the per-example loss from decoding at depth t. The oracle      tive depth. Direct-answer GSM8K scores low at this scale
+marks ‚Äúcontinue‚Äù only when a deeper loop helps,                   and most classic suites peak at shallow depth, so both are
+                                                                  less suited to the controlled study. From the MathQA test
+yt = ‚äÆ min Lt‚Ä≤ < Lt ‚àí Œ¥ ,  (6)                                    set we draw 8 non-overlapping evaluation seeds of 300 items
+t‚Ä≤ >t                                                             each, giving 2400 unique items with no item shared across
+                                                                  seeds, and select every stopping threshold on held-out data.
+for a margin Œ¥, and the head is trained with binary cross-        This covers about 80% of the test set while supporting per-
+entropy against yt at a set of probe depths. The same head        seed variance estimates (Appendix E). We compare against
+also supports the ACT and PonderNet objectives, which we          fixed-loop baselines, ACT and PonderNet on the same back-
+use for the baselines. At inference (Algorithm 1) the model       bone, the CALM confidence early-exit rule in its margin
+loops until the head says stop or a budget Tmax is reached,       and top-probability forms, and the recent LoopUS-Conf and
+with a floor of Tmin loops. The stopping threshold œÑ is chosen    TaH-Mismatch. All four scales use three training seeds that
+on held-out data, taking the smallest mean depth that does        vary the loop-module initialization and data order.
+not lose likelihood, and is never tuned on the test set.
+                                                                  4.2 Learned Halting on MathQA
+                   4 Experiments
+                                                                  Learned halting beats the best fixed depth and, with a
+Our experiments answer three questions about whether              two-loop floor, avoids collapse. An adaptive halting head
+learned halting beats the best fixed depth, whether the loop-     can fail in two opposite ways. It may collapse to a single
+memory gains carry across model scale and a broad task set,       loop, as indirect halting objectives tend to do when few in-
+and what the extra loops cost.                                    puts benefit from depth, or spend extra loops without im-
+                                                                  proving accuracy. An effective head should beat the best
+4.1 Experimental Setup                                            fixed depth at matched compute while avoiding both. Table 2
+Setup. We build RecurTrace on four Qwen3 scales (Ta-              shows that RecurTrace meets these criteria on MathQA at
+ble 1). At every scale we add the looped block to a pretrained    1.7B across three training seeds. It reaches 56.9% accuracy
+                                                                  (std 0.41 pp) at a mean of 2.04 loops, outperforming the best
+Method               Acc   Correct  Loops  ‚àÜ vs T =2                       Compute follows difficulty                                      Depth distribution by difficulty
+                                                                 4                                                                     40 mean 2.50
+Fixed depth, T =1   49.96    1199    1.00     ‚àí114                                                                                                              Easy
+Fixed depth, T =2   54.71    1313    2.00        0
+Fixed depth, T =8   53.62    1287    8.00                                                                                                            mean 3.10  Hard
+Fixed depth, T =16  47.54    1141   16.00      ‚àí26
+                                              ‚àí172               Mean loops                                                            30
+ACT                 49.96    1199    1.00                                                                                   Items (%)
+PonderNet           49.96    1199    1.00     ‚àí114                                                                                     20
+ACT + floor         54.71    1313    2.00     ‚àí114
+PonderNet + floor   54.71    1313    2.00                        2                                                                     10
+CALM (top-prob)     53.04    1273    4.15        0
+CALM (margin)       54.12    1299    5.63        0                             2.50   3.10                                             0
+LoopUS-Conf         55.25    1326    3.21      ‚àí40               0                    Hard                                                    12345678
+TaH-Mismatch        55.67    1336    2.12      ‚àí14
+                                               +13                              Easy                                                                    Loops (depth)
+RecurTrace          56.92    1366    2.04      +23
+                                                                 Figure 3: Depth tracks difficulty on MathQA at the illustrative
+                                              +53‚Ä†               operating point œÑ =0.10 (Appendix G reports the main point).
+                                                                 Left panel, hard items receive more loops than easy items on
+                                                                 average (3.10 versus 2.50), with dots showing the 8 seeds.
+                                                                 Right panel, both groups peak at two loops, but hard items
+                                                                 have a heavier tail, a mean gap of about 0.6 loops.
+
+Table 2: Adaptive depth on MathQA (1.7B, 3 training seeds        Task                 n Fixed Best Adaptive Loops
+√ó 8 non-overlapping evaluation seeds, 2400 unique items).
+Values are three-training-seed means. Acc is accuracy (%),       GSM8K                1319 5.5 9.2                                                   10.4       1.72
+Correct the mean number right of 2400, Loops the mean
+loop count, and ‚àÜ the correct-answer gain over fixed T =2.       MATH                 1500 18.3 19.1 21.5                                                       1.88
+‚Ä† exact McNemar p < 0.001 vs T =2 on every training seed.
+                                                                 AQUA-RAT             254 40.2 43.3 44.1                                                        1.14
+
+                                                                 ARC-Challenge 1172 63.8 67.9 69.7                                                              1.06
+
+                                                                 HotpotQA             1500 37.2 38.1 39.6                                                       2.76
+
+fixed depth (T =2) by 2.2 points at matched compute. The         Table 3: Per-task adaptive halting at 1.7B (each task trains
+exact McNemar test (McNemar 1947; Fagerland, Lydersen,           its own head and threshold). Fixed is a T =8 budget, Best
+and Laake 2013) confirms this gain for every training seed       the best fixed depth over {1, 2, 4, 6, 8}, Adaptive the halting
+(p < 0.001, Appendix E). The improvement has two sepa-           head, and Loops its mean loop count (n is the evaluation
+rable sources. The two-loop floor is what prevents collapse,     size, accuracies in %). These per-task heads run without the
+raising the one-loop baseline from 1199 to 1313 correct; on      two-loop floor (Tmin=1), so mean loops can fall below two.
+top of it, the learned head adds 53 more by deepening mostly     Adaptive matches or beats Best while cutting mean loops by
+items that benefit. Without the floor the head itself mostly     65‚Äì87%. Low accuracies reflect direct answers, not chain-
+stops at one loop (Appendix G), so the floor guarantees the      of-thought (Cobbe et al. 2021).
+depth while the head allocates it. The baselines fail in op-
+posite directions. ACT and PonderNet collapse to one loop        ating point (œÑ =0.10, mean 2.80 loops). An item is hard if it
+and, even with the same floor, never deepen beyond it, so        is wrong after one loop, easy otherwise. Hard items average
+they do not exceed fixed T =2. CALM spends 5.6 loops but         3.10 loops against 2.50 for easy ones, a gap of about 0.6
+reaches only 54.1%. Two recent baselines narrow the gap.         loops that stays positive on all eight seeds. The right panel
+LoopUS-Conf, a learned confidence head with monotonicity         shows both groups peak at two loops while hard items carry a
+training, reaches 55.3% at 3.2 loops, while TaH-Mismatch,        heavier tail. At the main operating point in Table 2 (œÑ =0.50,
+which distills an oracle based on token mismatch, reaches        mean 2.04 loops) the hard-easy gap is still positive at +0.06
+55.7% at 2.1 loops. Oracle supervision based on loss im-         loops even though 97.3% of items stop at the floor. Only ‚àº65
+provement lets RecurTrace surpass both with 56.9% at 2.0         items per training seed deepen further yet supply the entire
+loops. A correctness oracle that assigns each item the depth     +53 net gain (56 wrong-to-right, 3 right-to-wrong), and 85%
+at which its greedy answer is correct reaches 61.0%. Recur-      are oracle-positive (Appendix E).
+Trace therefore lies between the best fixed depth (54.7%) and
+this ceiling, closing about one third of the 6.3 point gap.      Adaptive halting transfers beyond MathQA. Oracle dis-
+                                                                 tillation transfers when each benchmark uses its own halting
+Fewer loops yield real speedups. A lower loop count is           head and a threshold selected on held-out data rather than
+a real saving only if runtime is set by the loop rather than     sharing one policy across tasks. Table 3 reports five tasks
+by the added modules, which contribute at most about 2.2%        at 1.7B against two baselines. The Fixed baseline always
+more parameters. Because every iteration re-runs the same        runs eight loops, which wastes compute because these tasks
+three-layer block, runtime grows with depth: about 1.1√ó the      rarely require that depth; against it, adaptive halting gains
+base model at two loops against 1.7√ó at eight and more           up to +5.9 points on ARC-Challenge and +4.9 on GSM8K
+at sixteen (Appendix C). Stopping near two loops therefore       while using far fewer loops. The stronger Best column selects
+buys a wall-clock speedup over deeper fixed schedules, not       each task‚Äôs best fixed depth from {1, 2, 4, 6, 8}, and adaptive
+merely a smaller reported loop count.                            halting matches or exceeds it on every task using only 1.1 to
+                                                                 2.8 loops on average.
+The halting head spends compute where it is needed.
+Figure 3 shows depth tracks difficulty at an illustrative oper-
+                                   Accuracy gain (pp)  NLL reduction (nats)                 NLL reduction (nats)                   Plain looping                       + Memory
+
+Accuracy gain (pp)  4                                                        +3.44
+                            0.150
+                                          0.076        +2.17                          0.1                         Likelihood, NLL ‚àÜ over baseline (nats) ‚Üì
+                    2              +1.20               0.022                          0.05
+                            +0.60                                                                                 0.6B             ‚àí0.06                               ‚àí0.15
+                                                                                                                                                                       ‚àí0.03
+                    0                                                          0.010                              1.7B             +0.07                               ‚àí0.03
+                             0.6B                                                                                                                                      ‚àí0.02
+                                                                             8B       0.01                        4B               +0.05
+
+                                   1.7B                4B                                                         8B               +0.06
+
+                                         Model scale                                                              Generation accuracy at 1.7B (%) ‚Üë
+
+                                                                                                                  MathQA           52.4                                54.7
+
+Figure 4: Gains persist across scale. The is the gener-                                                           Train-covered    33.2                                34.3
+ation accuracy gain over a same-budget fine-tuned baseline
+that grows to +3.4 points at 8B. The is the teacher-                                                              Classic          64.0                                66.4
+forced NLL reduction, positive at every scale and largest at
+0.6B, reaching 0.15 nats. Shaded bands denote ¬±1 standard                                                         Accuracy beyond the eight-loop training limit (%) ‚Üë
+deviation across 3 training seeds at each scale.
+                                                                                                                  Pointer-chasing  89.3                                84.6
+
+                                                                                                                  Symbolic state   38.5                                56.2
+
+                                                                                                                  Arithmetic       33.1                                49.8
+
+Suite                              #                   NLL ‚àÜ ‚Üì                        Acc ‚àÜ ‚Üë                     Table 5: Ablation of Loop Memory Attention against plain
+                                                                                                                  looping. Teacher-forced NLL ‚àÜ is measured against the
+Train-covered                      14                  ‚àí0.05                          +0.8                        same-budget baseline on the train-covered suite at the best-
+                                                       ‚àí0.13                          +1.9                        likelihood loop. Generation accuracy uses two loops at 1.7B.
+Classic                            8                                                                              The last three rows test whether the model still solves prob-
+                                                                                                                  lems that need more reasoning steps than training used, run-
+Table 4: Breadth at 1.7B against the same-budget fine-tuned                                                       ning the trained model past its eight-loop training limit on
+baseline, by benchmark family. Teacher-forced NLL change                                                          newly generated instances of three synthetic tasks whose
+(nats) and accuracy change (pp) are both at a fixed two-loop                                                      symbols are held out from training.
+depth. Per-suite numbers are in Appendix F.
+
+4.3 Scaling and Breadth                                                                                           5.1 What Drives the Gain
+
+RecurTrace scales from 0.6B to 8B. Figure 4 compares                                                              Loop Memory Attention is essential for effective looping.
+RecurTrace with the same-budget fine-tuned baseline across                                                        Table 5 isolates the contribution of Loop Memory Attention
+model sizes at a fixed two-loop depth without adaptive halt-                                                      by comparing it with plain looping, thereby testing whether
+ing. Generation accuracy over the combined train-covered                                                          additional loop depth alone explains the gains. On the train-
+and classic suites (22 tasks) improves at all four scales, by                                                     covered suite at 0.6B, plain looping lowers NLL by only 0.06
+0.6, 1.2, 2.2, and 3.4 points from 0.6B to 8B, and teacher-                                                       nats, while adding memory increases this reduction to 0.15
+forced NLL falls at all four, by 0.15, 0.08, 0.02, and 0.01                                                       nats. At 1.7B, 4B, and 8B, plain looping instead raises NLL
+nats. All four gains use three training seeds (std 0.22, 0.29,                                                    by 0.07, 0.05, and 0.06 nats. Memory reverses every one of
+0.33, 0.37 pp from 0.6B to 8B). The two metrics diverge with                                                      these regressions and lowers NLL by 0.03, 0.03, and 0.02
+scale because they average over different populations: NLL                                                        nats. Extra iterations are therefore unreliable on their own,
+over every answer token, most of which a strong base already                                                      while access to previous loop states turns them into consis-
+predicts confidently, accuracy only over items whose argmax                                                       tent refinement rather than representational drift. The same
+flips (Appendix H). Separate ablations isolate the memory                                                         conclusion holds for generation. At 1.7B, memory raises ac-
+at every scale (Table 5), and a matched same-start control at                                                     curacy over plain looping by 2.3 points on MathQA and 2.4
+8B confirms the advantage.                                                                                        points on the classic suite. Freezing the base is not what earns
+                                                                                                                  the classic-suite gain, since plain looping freezes the same
+Both task families gain, not just MathQA. The scaling                                                             base yet reaches only 64.0%, below the fine-tuned baseline‚Äôs
+results aggregate 22 tasks and could therefore be dominated                                                       64.5%, and only memory lifts it to 66.4%. Loop Memory At-
+by a few strong tasks. Table 4 addresses this concern at 1.7B                                                     tention is therefore not a minor enhancement to recurrence
+by separating the 14 train-covered tasks whose training splits                                                    but the mechanism that makes the added depth useful. The
+enter our mixture from the 8 classic multiple-choice bench-                                                       memoryless configuration is exactly the ETD baseline of
+marks and comparing each family with the same-budget                                                              Koishekenov, Lipani, and Cancedda (2026), making Table 5
+baseline. Both families improve on both metrics. Accuracy                                                         a direct comparison with the closest prior method.
+rises by +0.8 points on train-covered tasks and +1.9 on clas-
+sic tasks (64.5% to 66.4%), while NLL decreases for both.                                                         Task structure determines when memory helps. The last
+Per-task results appear in Appendix F.                                                                            three rows of Table 5 run each model past its eight-loop
+                                                                                                                  training limit and test whether it still reaches the correct
+             5 Ablations and Analysis                                                                             answer. The tasks come from synthetic generators with con-
+                                                                                                                  trollable difficulty and test symbols excluded from training,
+Having shown that RecurTrace works, we now ask why. We                                                            so accuracy reflects reasoning rather than memorization (Ap-
+separate the loop memory from the extra depth it exploits,                                                        pendix A). Pointer chasing follows a mapping from one sym-
+isolate what each loop component contributes, examine how                                                         bol to the next, so each step requires only the current symbol.
+the halting head behaves, and state the limits of these claims.
+Configuration (1.7B)          NLL ‚àÜ (nats) ‚Üì MathQA (%) ‚Üë         5.2 Halting Behavior
+
+Full RecurTrace               -0.03  54.7                         Indirect halting objectives collapse to one loop. ACT
+                                                                  and PonderNet add an expected-depth penalty (ACT) or
+‚àí QK-normalization            +0.05  52.8                         a geometric prior (PonderNet) on top of the same oracle-
+                                                                  depth signal RecurTrace distills, and both penalties reward
+Loop-distance bias frozen     ‚àí0.01  53.9                         stopping early. Because few examples benefit from addi-
+                                                                  tional loops, this generic pressure dominates the oracle
+Gates open at initialization  +0.02  53.1                         quality signal and drives both methods to stop after one
+                                                                  loop. Sweeping each baseline‚Äôs regularization strength over
+Memory window W =1            ‚àí0.01  53.5                         {0.001, 0.01, 0.1} leaves all six settings at a mean depth of
+                                                                  1.0, showing that the collapse is not tied to one hyperpa-
+Memory window W =2            ‚àí0.02  54.2                         rameter choice (Appendix E). The collapse is a property of
+                                                                  attaching penalty-based halting post hoc to a frozen back-
+Memory window W =5            ‚àí0.02  54.1                         bone, not a refutation of either method in the end-to-end
+                                                                  setting it was designed for. LoopUS-Conf avoids collapse
+Table 6: Component and window ablations at 1.7B, each             by training a dedicated confidence head with a monotonicity
+changing one piece of Loop Memory Attention against the           objective (Park et al. 2026), but without an oracle it still over-
+full top-row model. NLL ‚àÜ is the teacher-forced NLL change        spends at 3.2 loops. TaH-Mismatch (Fu et al. 2026b) distills a
+over the same-budget baseline on the train-covered suite at       token-mismatch oracle that marks whether the current depth
+best-likelihood loop (negative is better) and MathQA is gen-      mispredicts the answer, reaching 55.7% at 2.1 loops, closer
+eration accuracy at a fixed two-loop depth.                       to RecurTrace in compute but 1.2 points lower because the
+                                                                  mismatch signal does not distinguish items that more depth
+Symbolic state tracking applies rules that update an abstract     can help from items that are simply hard. RecurTrace‚Äôs loss-
+state, while arithmetic applies numerical operations toward a     improvement oracle captures this distinction (Figure 3).
+final value. Both require intermediate results to persist across
+steps. This structural distinction explains the results. Plain    One checkpoint supports multiple inference depths.
+looping leads by 4.7 points on pointer chasing, where past        Sampling the loop count during training lets the same check-
+states are unnecessary. Memory instead leads by 17.7 points       point produce the fixed-depth curve in Figure 1 and allows
+on symbolic state tracking and 16.7 points on arithmetic,         the halting head to choose among depths without retrain-
+where state must be preserved. The token-wise gate supports       ing. Because the loop-distance bias depends only on relative
+both regimes by suppressing memory for pure lookup and            distance, it remains defined beyond the eight-loop training
+activating it when past states matter, allowing one model to      range. At sixteen loops the model stays stable at 47.5% ac-
+handle all three tasks without separate tuning.                   curacy, below its two-loop peak of 54.7% (Appendix D).
+
+Capacity alone does not explain the gain. To separate re-         5.3 Limitations
+currence from added capacity, we compare RecurTrace with
+a non-looped adapter of matched size trained on the same          Four aspects remain outside the present study. First, halting
+block under the same protocol. The adapter raises generation      is sequence-level and assigns one depth to an entire exam-
+accuracy from 44.8% to 45.4%, half of RecurTrace‚Äôs 1.2-           ple rather than to individual tokens. Second, Loop Mem-
+point gain, and lowers overall 22-task teacher-forced NLL by      ory Attention reads only same-position states from a fixed
+only 0.01 nats compared with RecurTrace‚Äôs 0.08. The larger        three-loop window, which keeps the cost bounded but ex-
+gains therefore require looped depth with memory rather than      cludes older states and cross-position memory. Third, our
+additional parameters alone (Appendix H).                         experiments use frozen Qwen3 decoder-only models and
+                                                                  direct-answer targets, leaving other architectures and long-
+Additional optimization does not explain the memory               form generation untested. Finally, latent looping and chain-
+gain. At 8B, we isolate the effect of memory from ad-             of-thought use different forms of compute and are comple-
+ditional optimization by continuing the same plain-looping        mentary rather than direct substitutes, so combining them is
+checkpoint for an equal number of steps with or without Loop      a natural direction for future work.
+Memory Attention. Across both seeds, adding memory low-
+ers teacher-forced NLL by 0.03 to 0.04 nats, showing that                             6 Conclusion
+the gain cannot be explained by the starting checkpoint or
+the training budget (Appendix H).                                 We presented RecurTrace, which turns a pretrained LLM into
+                                                                  a memory-augmented looped reasoner with adaptive halting.
+The memory components serve complementary roles.                  Loop Memory Attention gives each iteration access to earlier
+Table 6 ablates each component in turn from full RecurTrace.      loop states, while an oracle-distilled halting head selects the
+Removing QK-normalization causes the largest degradation,         loop count for each input. RecurTrace matches or exceeds the
+indicating its role in stabilizing memory training. Freezing      best fixed depth across six tasks and improves accuracy over
+the loop-distance bias or initializing the gates open also de-    same-budget baselines at every scale from 0.6B to 8B. These
+grades both metrics, suggesting that the model should learn       results show that the loop trajectory can support both memory
+how to weight earlier loop states and introduce memory grad-      and adaptive computation, suggesting a natural extension to
+ually without disrupting pretrained representations. Among        chain-of-thought decoding.
+the tested window sizes, W =3 performs best, supporting a
+compact three-state memory (Appendix C).
+                       References                                      Geiping, J.; McLeish, S.; Jain, N.; Kirchenbauer, J.; Singh, S.;
+                                                                       Bartoldson, B. R.; Kailkhura, B.; Bhatele, A.; and Goldstein, T.
+Amini, A.; Gabriel, S.; Lin, S. P.; Koncel-Kedziorski, R.; Choi,       2025. Scaling up Test-Time Compute with Latent Reasoning: A
+Y.; and Hajishirzi, H. 2019. MathQA: Towards Interpretable Math        Recurrent Depth Approach. In Advances in Neural Information
+Word Problem Solving with Operation-Based Formalisms. In Pro-          Processing Systems.
+ceedings of the 2019 Conference of the North American Chapter of
+the Association for Computational Linguistics.                         Geva, M.; Khashabi, D.; Segal, E.; Khot, T.; Roth, D.; and Be-
+                                                                       rant, J. 2021. Did Aristotle Use a Laptop? A Question Answering
+Bachlechner, T.; Majumder, B. P.; Mao, H. H.; Cottrell, G. W.; and     Benchmark with Implicit Reasoning Strategies. Transactions of the
+McAuley, J. 2021. ReZero Is All You Need: Fast Convergence at          Association for Computational Linguistics.
+Large Depth. In Proceedings of the Thirty-Seventh Conference on
+Uncertainty in Artificial Intelligence.                                Goyal, S.; Ji, Z.; Rawat, A. S.; Menon, A. K.; Kumar, S.; and
+                                                                       Nagarajan, V. 2024. Think before You Speak: Training Language
+Bae, S.; Kim, Y.; Bayat, R.; Kim, S.; Ha, J.; Schuster, T.; Fisch,     Models with Pause Tokens. In International Conference on Learn-
+A.; Harutyunyan, H.; Ji, Z.; Courville, A.; and Yun, S.-Y. 2025.       ing Representations.
+Mixture-of-Recursions: Learning Dynamic Recursive Depths for
+Adaptive Token-Level Computation. In Advances in Neural Infor-         Graves, A. 2016. Adaptive Computation Time for Recurrent Neural
+mation Processing Systems.                                             Networks. In NIPS 2016 Deep Learning Symposium.
+
+Bai, S.; Kolter, J. Z.; and Koltun, V. 2019. Deep Equilibrium          Hao, S.; Sukhbaatar, S.; Su, D.; Li, X.; Hu, Z.; Weston, J.; and
+Models. In Advances in Neural Information Processing Systems.          Tian, Y. 2025. Training Large Language Models to Reason in a
+                                                                       Continuous Latent Space. In Reasoning and Planning for Large
+Banino, A.; Balaguer, J.; and Blundell, C. 2021. PonderNet: Learn-     Language Models Workshop at the International Conference on
+ing to Ponder. In 8th ICML Workshop on Automated Machine               Learning Representations.
+Learning.
+                                                                       Hendrycks, D.; Burns, C.; Basart, S.; Zou, A.; Mazeika, M.; Song,
+Bansal, A.; Schwarzschild, A.; Borgnia, E.; Emam, Z.; Huang, F.;       D.; and Steinhardt, J. 2021a. Measuring Massive Multitask Lan-
+Goldblum, M.; and Goldstein, T. 2022. End-to-End Algorithm             guage Understanding. In International Conference on Learning
+Synthesis with Recurrent Networks: Extrapolation without Over-         Representations.
+thinking. In Advances in Neural Information Processing Systems.
+                                                                       Hendrycks, D.; Burns, C.; Kadavath, S.; Arora, A.; Basart, S.; Tang,
+Bisk, Y.; Zellers, R.; Le Bras, R.; Gao, J.; and Choi, Y. 2020. PIQA:  E.; Song, D.; and Steinhardt, J. 2021b. Measuring Mathematical
+Reasoning about Physical Commonsense in Natural Language. In           Problem Solving with the MATH Dataset. In Advances in Neural
+Proceedings of the AAAI Conference on Artificial Intelligence.         Information Processing Systems Datasets and Benchmarks Track.
+
+Clark, C.; Lee, K.; Chang, M.-W.; Kwiatkowski, T.; Collins, M.; and    Ho, X.; Duong Nguyen, A.-K.; Sugawara, S.; and Aizawa, A. 2020.
+Toutanova, K. 2019. BoolQ: Exploring the Surprising Difficulty of      Constructing a Multi-hop QA Dataset for Comprehensive Evalua-
+Natural Yes/No Questions. In Proceedings of the 2019 Conference        tion of Reasoning Steps. In Proceedings of the 28th International
+of the North American Chapter of the Association for Computational     Conference on Computational Linguistics.
+Linguistics.
+                                                                       Knupp, J.; Metzen, J. H.; Bohn, J.; Groh, G.; and Kersting, K. 2026.
+Clark, P.; Cowhey, I.; Etzioni, O.; Khot, T.; Sabharwal, A.;           Depth-Recurrent Attention Mixtures: Giving Latent Reasoning the
+Schoenick, C.; and Tafjord, O. 2018. Think You Have Solved             Attention It Deserves. arXiv:2601.21582.
+Question Answering? Try ARC, the AI2 Reasoning Challenge.
+arXiv:1803.05457.                                                      Koishekenov, Y.; Lipani, A.; and Cancedda, N. 2026. Encode,
+                                                                       Think, Decode: Scaling Test-Time Reasoning with Recursive La-
+Cobbe, K.; Kosaraju, V.; Bavarian, M.; Chen, M.; Jun, H.; Kaiser,      tent Thoughts. In Latent and Implicit Thinking Workshop at the
+L.; Plappert, M.; Tworek, J.; Hilton, J.; Nakano, R.; Hesse, C.;       International Conference on Learning Representations.
+and Schulman, J. 2021. Training Verifiers to Solve Math Word
+Problems. arXiv:2110.14168.                                            Lan, Z.; Chen, M.; Goodman, S.; Gimpel, K.; Sharma, P.; and
+                                                                       Soricut, R. 2020. ALBERT: A Lite BERT for Self-Supervised
+Dehghani, M.; Gouws, S.; Vinyals, O.; Uszkoreit, J.; and Kaiser,       Learning of Language Representations. In International Conference
+L. 2019. Universal Transformers. In International Conference on        on Learning Representations.
+Learning Representations.
+                                                                       Ling, W.; Yogatama, D.; Dyer, C.; and Blunsom, P. 2017. Program
+Elbayad, M.; Gu, J.; Grave, E.; and Auli, M. 2020. Depth-Adaptive      Induction by Rationale Generation: Learning to Solve and Explain
+Transformer. In International Conference on Learning Represen-         Algebraic Word Problems. In Proceedings of the 55th Annual
+tations.                                                               Meeting of the Association for Computational Linguistics.
+
+Fagerland, M. W.; Lydersen, S.; and Laake, P. 2013. The McNemar        McNemar, Q. 1947. Note on the Sampling Error of the Difference
+Test for Binary Matched-Pairs Data: Mid-p and Asymptotic Are           Between Correlated Proportions or Percentages. Psychometrika,
+Better than Exact Conditional. BMC Medical Research Methodol-          12(2): 153‚Äì157.
+ogy, 13(1): 91.
+                                                                       Mihaylov, T.; Clark, P.; Khot, T.; and Sabharwal, A. 2018. Can a
+Frey, M.; Shomali, B.; Bashir, A. H.; Berghaus, D.; Koehler, J.; and   Suit of Armor Conduct Electricity? A New Dataset for Open Book
+Ali, M. 2026. Adaptive Loops and Memory in Transformers: Think         Question Answering. In Proceedings of the 2018 Conference on
+Harder or Know More? arXiv:2603.08391.                                 Empirical Methods in Natural Language Processing.
+
+Fu, H.; Guo, T.; Wang, Z.; Zhu, H.; Lee, J. D.; Jiao, J.; Rus-         Mohtashami, A.; Pagliardini, M.; and Jaggi, M. 2025. CoTFormer:
+sell, S.; and Mei, S. 2026a. DiscoLoop: Looping Discrete Em-           A Chain of Thought Driven Architecture with Budget-Adaptive
+beddings and Continuous Hidden States for Multi-hop Reasoning.         Computation Cost at Inference. In International Conference on
+arXiv:2607.00341.                                                      Learning Representations.
+
+Fu, T.; You, Y.; Chen, Z.; Dai, G.; Yang, H.; and Wang, Y. 2026b.      Paperno, D.; Kruszewski, G.; Lazaridou, A.; Pham, Q. N.; Bernardi,
+Think-at-Hard: Selective Latent Iterations to Improve Reasoning        R.; Pezzelle, S.; Baroni, M.; Boleda, G.; and Fern√°ndez, R. 2016.
+Language Models. In Latent and Implicit Thinking Workshop at the
+International Conference on Learning Representations.
+The LAMBADA Dataset: Word Prediction Requiring a Broad Dis-           Weston, J.; Bordes, A.; Chopra, S.; Rush, A. M.; van Merri√´nboer,
+course Context. In Proceedings of the 54th Annual Meeting of the      B.; Joulin, A.; and Mikolov, T. 2015. Towards AI-Complete Ques-
+Association for Computational Linguistics.                            tion Answering: A Set of Prerequisite Toy Tasks. arXiv:1502.05698.
+
+Park, T.; Lee, Y.; Kim, D.; and Bae, H. 2026. LoopUS: Recasting       Xin, J.; Tang, R.; Lee, J.; Yu, Y.; and Lin, J. 2020. DeeBERT:
+Pretrained LLMs into Looped Latent Refinement Models. arXiv           Dynamic Early Exiting for Accelerating BERT Inference. In Pro-
+preprint arXiv:2605.11011.                                            ceedings of the 58th Annual Meeting of the Association for Compu-
+                                                                      tational Linguistics.
+Patel, A.; Bhattamishra, S.; and Goyal, N. 2021. Are NLP Models
+Really Able to Solve Simple Math Word Problems? In Proceed-           Yang, A.; et al. 2025. Qwen3 Technical Report. arXiv:2505.09388.
+ings of the 2021 Conference of the North American Chapter of the
+Association for Computational Linguistics.                            Yang, Z.; Qi, P.; Zhang, S.; Bengio, Y.; Cohen, W. W.; Salakhutdi-
+                                                                      nov, R.; and Manning, C. D. 2018. HotpotQA: A Dataset for Di-
+Press, O.; Smith, N. A.; and Lewis, M. 2022. Train Short, Test Long:  verse, Explainable Multi-hop Question Answering. In Proceedings
+Attention with Linear Biases Enables Input Length Extrapolation.      of the 2018 Conference on Empirical Methods in Natural Language
+In International Conference on Learning Representations.              Processing.
+
+Raposo, D.; Ritter, S.; Richards, B.; Lillicrap, T.; Humphreys,       Yu, C.; Shu, X.; Wang, Y.; Zhang, Y.; Wu, H.; Li, J.; Long, R.;
+P. C.; and Santoro, A. 2024. Mixture-of-Depths: Dynamically           Chen, Z.; Xu, Y.; Su, W.; and Zheng, B. 2025. MeSH: Memory-as-
+Allocating Compute in Transformer-Based Language Models.              State-Highways for Recursive Transformers. arXiv:2510.07739.
+arXiv:2404.02258.
+                                                                      Zellers, R.; Holtzman, A.; Bisk, Y.; Farhadi, A.; and Choi, Y. 2019.
+Roy, S.; and Roth, D. 2015. Solving General Arithmetic Word           HellaSwag: Can a Machine Really Finish Your Sentence? In Pro-
+Problems. In Proceedings of the 2015 Conference on Empirical          ceedings of the 57th Annual Meeting of the Association for Compu-
+Methods in Natural Language Processing.                               tational Linguistics.
+
+Sakaguchi, K.; Le Bras, R.; Bhagavatula, C.; and Choi, Y. 2020.       Zeng, B.; Song, S.; Huang, S.; Wang, Y.; Li, H.; He, Z.; Wang, X.;
+WinoGrande: An Adversarial Winograd Schema Challenge at               Li, Z.; and Lin, Z. 2026. PonderLM: Pretraining Language Models
+Scale. In Proceedings of the AAAI Conference on Artificial In-        to Ponder in Continuous Space. In International Conference on
+telligence.                                                           Learning Representations.
+
+Saunshi, N.; Dikkala, N.; Li, Z.; Kumar, S.; and Reddi, S. J. 2025.   Zhai, Z.; Li, B.; Xiao, B.; Li, M.; and Wang, X. 2026. Adaptive Test-
+Reasoning with Latent Thoughts: On the Power of Looped Trans-         Time Compute Allocation for Reasoning LLMs via Constrained
+formers. In International Conference on Learning Representations.     Policy Optimization. arXiv:2604.14853.
+
+Schuster, T.; Fisch, A.; Gupta, J.; Dehghani, M.; Bahri, D.; Tran,    Zhang, K.; Zuo, Y.; He, B.; Sun, Y.; Liu, R.; et al. 2025. A
+V. Q.; Tay, Y.; and Metzler, D. 2022. Confident Adaptive Language     Survey of Reinforcement Learning for Large Reasoning Models.
+Modeling. In Advances in Neural Information Processing Systems.       arXiv:2509.08827.
+
+Schwarzschild, A.; Borgnia, E.; Gupta, A.; Huang, F.; Vishkin, U.;    Zhu, R.-J.; Wang, Z.; Hua, K.; Zhang, T.; Li, Z.; Que, H.; Wei, B.;
+Goldblum, M.; and Goldstein, T. 2021. Can You Learn an Algo-          Wen, Z.; Yin, F.; Xing, H.; et al. 2025. Scaling Latent Reasoning
+rithm? Generalizing from Easy to Hard Problems with Recurrent         via Looped Language Models. arXiv:2510.25741.
+Networks. In Advances in Neural Information Processing Systems.
+
+Sinha, K.; Sodhani, S.; Dong, J.; Pineau, J.; and Hamilton, W. L.
+2019. CLUTRR: A Diagnostic Benchmark for Inductive Reasoning
+from Text. In Proceedings of the 2019 Conference on Empirical
+Methods in Natural Language Processing.
+
+Suzgun, M.; Scales, N.; Sch√§rli, N.; Gehrmann, S.; Tay, Y.; Chung,
+H. W.; Chowdhery, A.; Le, Q. V.; Chi, E. H.; Zhou, D.; and Wei,
+J. 2023. Challenging BIG-Bench Tasks and Whether Chain-of-
+Thought Can Solve Them. In Findings of the Association for Com-
+putational Linguistics: ACL 2023.
+
+Tafjord, O.; Dalvi, B.; and Clark, P. 2021. ProofWriter: Generat-
+ing Implications, Proofs, and Abductive Statements over Natural
+Language. In Findings of the Association for Computational Lin-
+guistics: ACL-IJCNLP 2021.
+
+Trivedi, H.; Balasubramanian, N.; Khot, T.; and Sabharwal, A. 2022.
+MuSiQue: Multihop Questions via Single-hop Question Composi-
+tion. Transactions of the Association for Computational Linguistics.
+
+Wang, X.; Wei, J.; Schuurmans, D.; Le, Q.; Chi, E. H.; Narang,
+S.; Chowdhery, A.; and Zhou, D. 2023. Self-Consistency Improves
+Chain of Thought Reasoning in Language Models. In International
+Conference on Learning Representations.
+
+Wei, J.; Wang, X.; Schuurmans, D.; Bosma, M.; Ichter, B.; Xia, F.;
+Chi, E.; Le, Q.; and Zhou, D. 2022. Chain-of-Thought Prompting
+Elicits Reasoning in Large Language Models. In Advances in Neural
+Information Processing Systems.
+
+Wei, X.; Liu, X.; Zang, Y.; Dong, X.; Cao, Y.; Wang, J.; Qiu, X.;
+and Lin, D. 2025. SIM-CoT: Supervised Implicit Chain-of-Thought.
+arXiv:2509.20317.
+            A Implementation Details                             Training budget (8B)         Baseline    RecurTrace
+
+This appendix records the configuration, training setup, and     Stage 1 ‚Äî Loop/memory training (matched same-budget)
+evaluation protocol behind the results in the main paper,
+together with the per-scale and per-suite breakdowns that the    Base weights                 fine-tuned  frozen
+page limit keeps out of the body. Every value comes from a
+logged run. Where a quantity is not logged we describe it in     Trainable parameters         ‚âà8.2B       ‚âà0.12B (‚â§ 2%)
+words rather than supply a number.
+                                                                 Optimizer, schedule          AdamW, cosine AdamW, cosine
+Models and Looped Blocks. We build RecurTrace on four
+pretrained Qwen3 bases. Table 1 in the main text lists the       Optimizer steps              800         800
+architecture of each base and the block we loop. The 0.6B
+and 1.7B bases have 28 layers and loop layers 12‚Äì14. The         Global batch (seq.)          128         128
+4B and 8B bases have 36 layers and loop layers 15‚Äì17. The
+block is always three contiguous layers, and Appendix B          Micro-batch √ó accum.         2√ó8         2√ó8
+describes the angular-distance span probe and the compact-
+window controls used to fix it. We add the loop parameters       Max length (tokens)          1024        1024
+to the pretrained checkpoint and leave the base attention, the
+embeddings, and the tokenizer untouched. All four are base       Training tokens              ‚âà105M       ‚âà105M
+releases.
+                                                                 Hardware                     8√óH800      8√óH800
+What We Train. At every scale we freeze the base weights
+and train the added modules in two stages. Stage 1 trains the    Precision                    bfloat16      bfloat16
+loop modules, that is Loop Memory Attention and the input-       Fwd. layer-passes/token         L        L+(T¬Ø‚àí1)k
+injection scalars, under the matched same-budget protocol
+against the baseline. Stage 2 then freezes the base together     Training FLOPs (analytical)  ‚âà 6N D      ‚â≤ 6N D
+with the loop modules and distills the halting head on top
+(Appendix E), a separate optimization we run at all four         Stage 2 ‚Äî Halting distillation (RecurTrace only; App. E)
+scales. At each scale the baseline is a model fine-tuned under
+a matched budget, so the Stage 1 comparison is same-budget       Trained module               ‚Äî           halting head
+throughout. Appendix H reports the per-scale numbers.
+                                                                 Base + loop modules          ‚Äî           frozen
+Same-Budget Protocol and Training Budget. We use
+‚Äúsame-budget‚Äù in a precise sense: the RecurTrace run and         Optimizer steps              ‚Äî           200
+its baseline share every training axis we control (optimizer,
+schedule, global batch, maximum length, optimizer steps,         Learning rate, schedule      ‚Äî           3e‚àí4, cosine
+total tokens, hardware, and precision), and differ only in
+what is trained. The baseline fine-tunes the full base model,    Oracle horizon               ‚Äî           depth 16
+while RecurTrace in this matched Stage 1 freezes the base
+and trains only the loop, memory, and injection modules,         Oracle losses                ‚Äî           cached offline
+at most about 2.2% of the parameters (Table S1); the halt-
+ing head is distilled in a separate Stage 2 (Table S1, Ap-       Extra FLOPs vs. Stage 1      ‚Äî           <20%
+pendix E). This asymmetry means the two runs do not con-
+sume identical FLOPs, but the difference does not favor Re-      Table S1: Training-budget accounting at 8B, in two stages.
+curTrace. Under the standard forward, activation-gradient,       In Stage 1 all controlled axes are matched; the baseline fine-
+and weight-gradient ‚âà 2:2:2 decomposition of training com-       tunes the full model while RecurTrace freezes the base and
+pute (‚âà 6N D for N parameters and D tokens), RecurTrace‚Äôs        trains only the loop, memory, and injection modules (T¬Ø‚âà3.9
+loop unroll raises the forward cost, since at the mean train-    mean training depth, k=3 looped layers, L=36). FLOPs
+ing depth of 3.9 the three-layer block runs about 3.9 times,     are analytical (forward:backward ‚âà 2:4), not wall-clock.
+roughly 1.24√ó the baseline‚Äôs single forward pass on a 36-        Stage 1 trainable parameters and per-token compute differ,
+layer base. Freezing the base, however, removes the weight-      with any mismatch favoring the baseline. Stage 2 distills the
+gradient term for about 98% of the parameters, one of the        halting head with the base and loop modules frozen (Ap-
+three equal contributions to full-fine-tuning compute. These     pendix E); it is a RecurTrace-only cost outside the matched
+effects roughly offset, so RecurTrace‚Äôs total training FLOPs     budget, adding 200 optimizer steps with depth-1‚Äì16 oracle
+are comparable to, and by this accounting no larger than,        losses pre-computed in a single offline forward sweep over
+the baseline at matched steps and tokens (of order 5 √ó 1018      ‚âà5,000 examples, for less than 20% additional FLOPs be-
+analytical FLOPs at 8B for both). We did not separately log      yond Stage 1. The fixed-two-loop scaling results (Table S12)
+wall-clock GPU-hours or peak memory; these trade in op-          use only the Stage 1 model, whereas the adaptive-halting re-
+posite directions, since the baseline holds optimizer state for  sults (Tables 2‚Äì3) rely on Stage 2.
+all parameters whereas RecurTrace instead stores activations
+across the loop unroll, so neither method gains a systematic     runtime advantage. Any residual mismatch therefore favors
+                                                                 the baseline, which trains far more parameters under a full
+                                                                 gradient budget, so the reported same-budget gains are con-
+                                                                 servative rather than a product of extra training compute.
+                                                                 The parameter-matched non-loop control and the matched
+                                                                 same-start continuation at 8B (Appendix H) further isolate
+                                                                 the gains from parameter count and optimization budget.
+
+                                                                 Loop Hyperparameters. Table S2 lists the loop config-
+                                                                 uration and the field names that set it. The loop configu-
+                                                                 ration is shared across scales and comprises three looped
+                                                                 layers, a training-depth clamp of eight, log-normal Poisson
+                                                                 depth sampling with mean four and log-space deviation 0.5,
+                                                                 a memory window of three loops, four Loop Memory At-
+                                                                 tention heads with QK-normalization, a scalar memory gate
+                                                                 initialized to one, a token-wise gate whose bias starts at ‚àí3.0
+                                                                 (a sigmoid value near 0.047), and an input-injection scalar
+                                                                 initialized to zero. The relative loop-distance bias starts at
+                                                                 the ALiBi slopes but stays free and signed, so a head can
+flatten it or even prefer older memory.                             {2, 3, . . . , 8}, matching the eight-loop training clamp, and
+                                                                    test instances are organized into eight difficulty buckets at
+Optimization and Hardware. All runs use eight H800                  k ‚àà {2, 4, 6, 8, 10, 12, 14, 16} with 500 freshly generated in-
+GPUs (80GB) with ZeRO-2 sharded data parallelism (opti-             stances per bucket (4 000 per task). The four buckets beyond
+mizer states and gradients sharded across the eight GPUs),          the training range (k ‚àà {10, 12, 14, 16}, 2 000 instances),
+bfloat16, FlashAttention-2, and sequence packing that keeps         each evaluated at a matched loop depth T =k, form the ex-
+sample boundaries isolated so no token attends across a             trapolation subset reported in the bottom block of Table 5.
+packed example. The 0.6B and 1.7B loop modules train on             Table S3 shows a worked example of each of the three tasks.
+the full reasoning mixture for fifteen epochs at a peak learn-
+ing rate of 1e‚àí4 with a cosine schedule, a global batch of 128         Pointer chasing. Each instance draws 32 symbols from
+sequences, and a maximum length of 1024 tokens, which af-           the pool, arranges them as a random permutation (a one-to-
+ter sequence packing is roughly 25 thousand optimizer steps.        one mapping), and specifies a start symbol together with a
+The 4B and 8B loop-module runs are short follow-ups from            target hop count k. The answer is the symbol reached after
+their checkpoints, with the 4B modules training 300 steps at        following the mapping k times. Because each hop reads only
+1e‚àí5 and the 8B modules for 800 steps.                              the current symbol to look up the next, the task is a stateless
+                                                                    lookup that does not require remembering earlier steps.
+Training Data. The reasoning mixture holds about 1.15
+million direct-answer examples across seventeen files. It              Symbolic state tracking. The state is a 6-register vector,
+combines three synthetic generators (p-hop pointer chains,          each register taking a value in {0, 1, 2, 3}. A rule is one
+symbolic state tracking, and arithmetic word problems, each         of five atomic operations (assign, swap, increment-mod-4,
+contributing roughly 150 thousand training items), a real-          conditional-set, copy) applied to one or two named registers.
+math group (GSM8K, MATH, AQUA-RAT (Ling et al.                      Each instance gives a random initial state and a sequence of
+2017), MetaMathQA, Orca-Math, and MathQA), a multi-                 k randomly sampled rules; the answer is the final register
+hop question-answering group (HotpotQA (Yang et al. 2018),          vector. Every step depends on the value the previous step
+MuSiQue (Trivedi et al. 2022), 2WikiMultiHopQA (Ho et al.           produced, so intermediate state must be carried across loops.
+2020), and StrategyQA (Geva et al. 2021)), and a controlled-
+logic group (ProofWriter (Tafjord, Dalvi, and Clark 2021),             Arithmetic. Each instance starts from a random integer in
+CLUTRR (Sinha et al. 2019), and bAbI (Weston et al. 2015)),         [1, 99] and lists k operations drawn from {+n, ‚àín, √ón}
+with a small slice of C4 as a language anchor. Every example        with n ‚àà {2, 3, . . . , 9}. The answer is the integer obtained
+is direct-answer, so the target is the short final answer, not a    after applying all k operations in order. As with symbolic
+chain of thought, and test-time loops add latent computation        state tracking, intermediate results must survive across steps.
+instead of output tokens. The two symbol-based tasks draw
+their test symbols from a held-out pool and the arithmetic             The two stateful generators (symbolic state tracking, arith-
+generator samples fresh integer problems, so the extrapola-         metic) are thus the ones that reward reading earlier loop states
+tion buckets are disjoint from training.                            through Loop Memory Attention, while pointer chasing is the
+                                                                    one that does not. Because the symbol-based test instances
+Train-Test Overlap Audit. Because the mixture includes              draw exclusively from the 32-token held-out pool (and arith-
+MetaMathQA, Orca-Math, and other derivatives alongside              metic problems are sampled fresh), a correct answer cannot
+GSM8K, MATH, and MathQA, we audit overlap with every                come from a memorized surface form, and because the ex-
+benchmark test set before mixing. We lower-case and strip           trapolation buckets require 10‚Äì16 sequential steps the model
+whitespace, then remove any training question that exactly          must compose the learned per-step reasoning beyond the
+matches a test question. We also drop training items whose          depth it trained on.
+13-gram Jaccard similarity to a test question exceeds 0.85.
+Removals total 327 examples (0.03% of the mixture), all                                B Block Selection
+near-duplicates with zero exact matches. The main compar-
+isons hold training data fixed across methods, but this audit       We use the angular-distance probe of Koishekenov, Lipani,
+limits how much test-surface leakage can shift which items
+benefit from extra loops.                                           and Cancedda (2026) as the first stage of block selection.
+
+Synthetic Reasoning Tasks. Three procedural generators              For every input we read the residual stream at the final
+supply the controllable part of the mixture, each contributing
+about 150 thousand direct-answer training items and a sepa-         token, the one position that a causal model lets see the
+rately generated test set. The two symbol-based tasks (pointer
+chasing, symbolic state tracking) draw from a shared pool           whole sequence, and we record each layer‚Äôs hidden state. We
+of 128 abstract symbols (random two-character uppercase
+codes with no semantic content), of which 96 are reserved           then measure the angular distance between adjacent layers,
+for training and 32 are held out exclusively for testing, so their
+train and test sets share no symbol; the arithmetic generator       d(x‚Ñì, x‚Ñì+1)  =  1  arccos  cos(x‚Ñì,  x‚Ñì+1),  and  average  it  over
+instead samples integer problems fresh at test time. Diffi-                         œÄ
+culty is controlled by the number of sequential steps k the         about ten thousand inputs. The resulting curve falls steeply
+answer requires: training instances sample k uniformly from
+                                                                    across the early layers (the encoder), flattens through the
+
+                                                                    middle (the reasoning-critical span that behaves like a fixed
+
+                                                                    point), and rises again near the output (the decoder). The
+
+                                                                    Kneedle knee-finder locates the encoder boundary on the for-
+
+                                                                    ward curve and the decoder boundary on the reversed curve,
+
+                                                                    and the layers between them form a loopable thinking span.
+
+                                                                    Because that span can be wider than our three-layer com-
+
+                                                                    pute budget, the second stage compares compact three-layer
+
+                                                                    windows inside or near the span by downstream behavior.
+
+                                                                    On the 28-layer bases the probe is sharp. For Qwen3-0.6B,
+
+                                                                    both the C4 validation set and the training mixture place the
+Component              Field                Value                  Component                                  Value
+
+Looped layers          loop_num_layers      3                      Token-gate bias (...init_bias)             ‚àí3.0
+Max training depth     loop_train_max       8                      Injection init Œ± (...injection_init)       0.0
+Depth sampler          loop_sample_dist     lognormal Poisson      Halting margin Œ¥ (...aux_margin)           0.01
+Target mean depth      loop_train_mean      4.0                    Halting depth cost (...depth_cost)         0.0
+Depth log-deviation œÉ  loop_train_sigma     0.5                    Probe depths (...aux_depths)               1, 2, 4, 6
+Memory window W        loop_memory_window   3                      Pooling (...pooling)                       prompt mean
+LMA heads              loop_attn_num_heads  4                      Objective (...objective)                   oracle
+Scalar gate init Œ≥     loop_gate_init       1.0                    Inference floor Tmin (...min_depth)        2
+Inference budget Tmax  ...max_depth         16                     Oracle horizon (...oracle_max)             16
+
+Table S2: Loop, memory, and halting hyperparameters with their configuration fields (the loop_ prefix and, for halting fields,
+the loop_halting_ prefix are abbreviated as ...). Values are defaults used across scales. The ACT and PonderNet baselines
+reuse the head with objective set to act (expected-depth cost 0.01) or pondernet (geometric prior Œª=0.2, KL weight 0.01).
+
+Task             Example instance                                  Reasoning steps                            Answer
+Pointer chasing                                                                                               VP
+                 Mapping MK‚ÜíTQ, TQ‚ÜíZR, ZR‚ÜíVP,                      MK ‚Üí TQ ‚Üí ZR ‚Üí VP                          [3, 3, 0, 0, 0, 1]
+Symbolic state   VP‚ÜíHB, HB‚ÜíMK. Start at MK and
+tracking         follow k=3 hops.                                                                             48
+
+Arithmetic       Initial state [2, 0, 1, 3, 0, 2] over registers   [2, 0, 1, 3, 0, 2] ‚Üí [3, 0, 1, 3, 0, 2] ‚Üí
+                 r0 to r5. Apply k=4 rules, namely inc             [3, 3, 1, 0, 0, 2] ‚Üí [3, 3, 0, 0, 0, 2] ‚Üí
+                 r0 (mod 4), swap (r1, r3), copy r4 into           [3, 3, 0, 0, 0, 1]
+                 r2, and set r5=1 when r0=3.
+
+                 Start from 7 and apply k=4 operations 7 √ó 3 = 21, 21 + 8 = 29, 29 ‚àí 5 = 24,
+
+                 √ó3, +8, ‚àí5, √ó2 in order.                          24 √ó 2 = 48
+
+Table S3: Worked examples of the three synthetic reasoning tasks described in this appendix. Each row gives one instance, its
+reasoning steps, and the final answer the model must produce. The instances are deliberately small, using fewer symbols and
+steps than the deployed generators, so the reasoning is easy to follow. Pointer chasing needs only the current symbol at each
+hop, while symbolic state tracking and arithmetic must carry intermediate values across steps, which is why reading earlier loop
+states through Loop Memory Attention helps on the latter two.
+
+encoder at the first eleven layers and select layers 12‚Äì14 as the        C Loop Memory Attention Details
+compact block. These three layers sit 15 to 25 percent below
+their neighbors, while no fourth layer is separated enough to      Each looped layer carries its own memory. On loop t, layer ‚Ñì
+add. The formal C4 probe on Qwen3-1.7B returns the same            reads only the states that layer ‚Ñì wrote on earlier loops, never
+window, so both 28-layer models use 12‚Äì14.                         another layer‚Äôs states, and the attention runs along the loop-
+                                                                   time axis rather than the sequence axis. A token therefore
+   On the 36-layer 4B and 8B bases, the C4 probe again             attends from its current state to its own past-loop states at
+puts the start of the thinking span near layer 14, but its         the same sequence position, which is why the module adds
+lowest-distance core is not itself the best loop location. We      no path for one token to see another and cannot leak fu-
+therefore compare the deployed early-middle window, layers         ture tokens. The ordinary self-attention inside the unchanged
+15‚Äì17, against probe-core and late controls. At 4B, layers         decoder layer still does all of the cross-token mixing.
+15‚Äì17 improve likelihood relative to the baseline (negative
+log-likelihood changes of ‚àí0.0218 without generation and              The query for the memory attention is the previous loop‚Äôs
+‚àí0.0075 with generation), while the probe-core window 24‚Äì          output of the same layer, which is also the newest key and
+26 ties it. At 8B, layers 15‚Äì17 are the strongest among the        value, so the query, keys, and values share one residual po-
+tested windows on both likelihood and generation accuracy,         sition and one source. We apply QK-normalization, an RM-
+the probe-core window 18‚Äì20 improves less, and a late win-         SNorm on the per-head queries and keys before their dot
+dow 27‚Äì29 at the same 800-step budget gives almost no              product. Removing it causes the largest degradation in Ta-
+improvement. These comparisons are relative rankings used          ble 6, indicating that the normalization stabilizes memory
+only to fix the loop location. We therefore loop the compact       training. We bound the memory with a sliding window of
+early-middle thinking block for the 36-layer models, not an        W =3 loops. Once t > W , every loop reads the same num-
+arbitrary deep block. The angular probe identifies the span,       ber of past states, so the memory span remains fixed as depth
+and the compact-window ablation fixes the final three layers.      grows and storage does not increase with the total loop count.
+
+                                                                      Two gates and one bias control the path. A per-layer
+                                                                   scalar gate Œ≥ starts at one, and a token-wise gate g =
+                                                                   œÉ(MLP([q, X])) starts from a bias of ‚àí3.0, a sigmoid value
+                                                                   near 0.047, so the effective update through the memory is
+small at initialization while still receiving gradients. The       truncated backpropagation through the loop. The block is
+input-injection scalar Œ± starts at zero in the ReZero style        three layers and the memory window is three, so the unrolled
+(Bachlechner et al. 2021), so the injection path initially con-    graph stays small enough to backpropagate in full.
+tributes nothing and can open gradually during training. Be-
+cause injection begins only after the first loop and the first        Distributed training keeps the depth in lock step. Every
+loop has no memory, every one-loop run exactly matches             rank advances a per-forward counter from a shared seed and
+the frozen base computation both before and after training         draws the same loop count, so the eight data-parallel work-
+at all scales. The relative loop-distance bias is a free, signed,  ers run the same number of loops on each step without any
+per-head slope initialized to the ALiBi values (Press, Smith,      extra communication. The trainer marks unused parameters
+and Lewis 2022). The signed form lets a head learn a flat          as expected, because a step that samples a single loop never
+profile or a preference for older states, while the relative       touches the memory parameters, and this keeps gradient syn-
+form remains defined at loop distances not observed during         chronization correct under data parallelism.
+training. Memory attention adds no quadratic sequence term
+because each token attends over only its own W past-loop                   E Halting Head and Calibration
+states. Its cost is O(seq √ó W ) per looped layer per loop and
+O(seq √ó W √ó loops) over the full unroll, which reduces to          The halting head is a single linear layer that reads a pooled
+O(seq √ó loops) for fixed W , on top of the base model‚Äôs usual      loop state and returns a continue logit, pt = œÉ(w‚ä§zt + b).
+attention. Each looped layer uses four memory-attention            We pool over prompt positions, with the prompt-mean pool
+heads of dimension 128 (width 512, well below d), so the           as the default and a prompt-last pool available for the setting
+attention needs four d√ó512 projections while the token-gate        that matches the position predicting the first answer token.
+on [q, X] contributes the dominant ‚àº2d2; summed over the           We train the head by distilling an oracle that reads the same
+three looped layers this is about 2.1 percent of the base at       forward pass. The oracle marks ‚Äúcontinue‚Äù at depth t only
+0.6B (with Loop Memory Attention roughly 2.07 percent)             when a deeper loop lowers the per-example loss by more
+and a small fraction (about 1.4‚Äì2.2%) at every scale, ‚âà0.12B       than a margin, yt = ‚äÆ[mint<t‚Ä≤‚â§16 Lt‚Ä≤ < Lt ‚àí Œ¥], with
+at 8B. Under our measured teacher-forced setup, runtime is         Œ¥ = 0.01 by default. An optional depth cost can charge each
+about 1.1√ó the unlooped baseline at two loops, 1.3√ó at four        extra loop a quality price before it counts as worthwhile,
+loops, and 1.7√ó at eight loops.                                    and we keep it at zero in the runs reported here. The loss
+                                                                   for the answer comparison is the mean loss over answer to-
+Inference-Time Behavior and Cost. At generation time               kens. We supervise the head at the probe depths {1, 2, 4, 6}
+the halting decision is read once from the prompt state, and       with binary cross-entropy, freeze every other parameter, and
+the chosen depth is reused for every generated token, so           optimize only the head with AdamW at a learning rate of
+no additional halting decision is made per generated token.        3e‚àí4, a cosine schedule with warmup, and gradient clipping
+Loop Memory Attention keeps at most W past-loop states             at one. This head distillation is a separate second stage run
+per looped layer for each token. Its footprint therefore scales    at all four scales: we first train the loop, memory, and injec-
+linearly with sequence length but remains constant in the          tion modules (the matched Stage 1 run of Table S1), then
+total loop count. The looped layers‚Äô self-attention cache does     freeze them together with the base and fit only the halting
+grow with loop count because each loop produces distinct           head, at a different learning rate from Stage 1. Because the
+keys and values. At the two-loop operating point, the self-        ‚Äúcontinue‚Äù labels require the per-depth losses L1, . . . , L16 of
+attention and memory additions together are about 15% of the       each training example, Stage 2 adds a forward-only depth-16
+base key-value cache at 1.7B. Under our measured decoding          unroll over its training set; it runs for 200 optimizer steps on
+setup, latency at the mean operating depth of 2.04 loops is        ‚âà5,000 examples, the oracle losses are precomputed once in
+about 1.1√ó the unlooped baseline.                                  a single offline sweep, and this oracle-unroll compute is the
+                                                                   primary cost reported in the FLOP accounting of Table S1.
+               D Variable-Depth Training                           When continue labels are rare, an optional per-depth positive
+                                                                   weight keeps the loop-one majority from washing them out.
+We sample the loop count once per forward pass from the
+                                                                      At inference the model runs the loop and stops at the first
+clamped log-normal Poisson distribution of Geiping et al.          depth t ‚â• Tmin where the continue probability falls below
+                                                                   a threshold œÑ , otherwise it runs to the budget Tmax=16. We
+(2025). With target mean r¬Ø = loop_train_mean ‚àí 1                  use a floor of Tmin=2 in the main comparison so the halting
+                                                                   head cannot collapse to a single loop. Both the floor and the
+and log-space deviation œÉ, we draw z ‚àº N (log r¬Ø ‚àí                 threshold are fixed on held-out data and never on the test set:
+                                                                   we choose œÑ by taking the smallest mean depth that does not
+1  œÉ2  ,  œÉ),  set  r  ‚àº  Poisson(ez) + 1,  and  clamp  r  to      lose held-out likelihood, and we select Tmin on the same held-
+2                                                                  out split. The floor therefore coincides with the best fixed
+[1, loop_train_max]. With the defaults (mean four,                 depth of Table 2 because the held-out likelihood profile puts it
+                                                                   there, not because the test set was consulted. The main row in
+œÉ=0.5, clamp eight) the realized distribution over depths          Table 2 uses the threshold selected by held-out negative log-
+                                                                   likelihood (œÑ =0.50), which spends 2.04 loops on average.
+is approximately 10% at one loop, 19% at two, 20% at three,        An alternate selector on held-out accuracy (œÑ =0.40) spends
+                                                                   2.06 loops at a similar operating point. A leave-one-seed-out
+17% at four, 12% at five, 8% at six, 5% at seven, and 8% at        check sets each seed‚Äôs threshold from the other seven seeds,
+
+eight, with a mean near 3.9, a median of four, and a heavy
+
+tail in which about a fifth of forward passes run six loops
+
+or more. The heavy tail is what exposes the model to deep
+
+unrolls and, together with the relative loop-distance bias,
+
+supports extrapolation beyond the training clamp. We apply
+
+the language-model loss at the sampled depth and do not use
+testing whether the reported gain depends on a test-tuned          Depth        Supervised  Bal. acc (%)  AUROC
+threshold rather than on the halting head itself. Under this
+protocol the gain is +2.0 points (range [+0.4, +3.8] across           1              yes         68.0       0.76
+the eight leave-one-out folds), close to the held-out number,         2              yes         66.5       0.74
+so the reported gain does not rely on a test-tuned threshold.         3              no          65.4       0.73
+                                                                      4              yes         64.2       0.71
+Paired Significance. We test the MathQA halting head                  5              no          62.8       0.69
+against fixed-depth compute with paired statistics over the           6              yes         61.6       0.67
+matched test items, using exact McNemar tests (McNemar                7              no          60.7       0.66
+1947; Fagerland, Lydersen, and Laake 2013) on the discor-             8              no          59.3       0.64
+dant pairs and 10,000-sample paired bootstraps. The eight
+evaluation seeds are non-overlapping, so the 2400 items are        Table S4: Per-depth halting calibration on held-out MathQA
+unique instances and the McNemar test is computed on 2400          items (median training seed). Balanced accuracy is the mean
+independent pairs. The counts below are three-training-seed        of per-class agreement rates with Eq. (6) continue labels,
+means; the McNemar test gives p < 0.001 on every indi-             which accounts for the growing class imbalance at deeper
+vidual training seed. RecurTrace answers 53 more questions         depths. Depths 3, 5, and 7 are used at inference but not
+than the best fixed depth (1366 versus 1313 of 2400), a 2.2-       directly supervised.
+point gain at matched mean depth (std 0.29 pp across training
+seeds), with a mean discordant split of 56 to 3 (59 pairs) favor-  Loop depth               Count            %
+ing adaptive halting and a 95% bootstrap interval, clustered
+on the eight evaluation seeds, of [+0.8, +3.6] percentage                2                    2335        97.3
+points. The 56 wrong-to-right transitions concentrate among              3                       48         2.0
+the ‚àº65 items per training seed that receive more than two               4                       10         0.4
+loops (Table S6), and the 3 right-to-wrong transitions con-              5                        3         0.1
+firm that the oracle-distilled head seldom over-loops an item            6                        2
+already correct.                                                         7                        1       <0.1
+                                                                         8                        1       <0.1
+Full Test Set Check. The 2400 evaluation items cover                                                      <0.1
+about 80% of the MathQA test set and support per-seed               >2 (total)                   65
+variance across eight non-overlapping draws. A single-seed                                                  2.7
+run on the full test set (2985 items) reaches 56.7% at 2.03
+mean loops, within 0.3 pp of Table 2.                              Table S5: Depth histogram at the main operating point
+                                                                   (œÑ =0.50, Tmin=2, 8 non-overlapping evaluation seeds,
+Composition of the Deepened Items. The ‚àº65 items per               2400 unique items). Counts are three-training-seed means
+training seed deepened past the two-loop floor are analyzed        (rounded). Most items halt at the floor; the 65 continuing to
+by MathQA operation category, answer-token length, and             three or more loops drive the accuracy gain.
+one-loop hardness. ‚àº50 of ‚àº65 (77%) are hard by the one-
+loop split. They span several operation categories rather than     The mean depth is 2.04 loops, matching Table 2; no item
+concentrating in one family, and their median answer length        reaches the Tmax=16 budget, so every stop is head-decided.
+stays close to the 2400-item subsample, so the gain is not
+driven by one template family.                                     Paired Transition Breakdown. Table S6 cross-tabulates
+                                                                   per-item correctness under adaptive halting versus the fixed
+Halting at Non-Probe Depths. Binary cross-entropy su-              two-loop baseline (three-training-seed means, rounded). Of
+pervision uses probe depths {1, 2, 4, 6}, but inference assigns    2400 items, 1310 are answered correctly by both methods and
+a continue probability at every integer depth. Table S5 shows      1031 by neither, leaving 59 discordant pairs. Adaptive halting
+halting decisions at depths 3 through 8. Table S4 reports          flips 56 items from wrong to right and only 3 from right to
+held-out balanced oracle-label accuracy and area under the         wrong, a net gain of +53 items (+2.2 points). All 56 wrong-
+ROC curve at all depths 1‚Äì8. Depths 3, 5, and 7 sit between        to-right transitions come from the ‚àº65 items that receive
+supervised probes, and each stays within 1.2 points of its         more than two loops, confirming that the extra computation
+nearest supervised neighbor, so the linear readout degrades        is responsible for the accuracy gain. The 3 right-to-wrong
+smoothly across the depths it never saw rather than breaking       cases are items where over-looping past the correct answer at
+at them.                                                           depth two leads to a changed and incorrect response, but the
+                                                                   oracle-distilled head keeps such regressions rare. The pattern
+Depth Histogram at the Main Operating Point. Table S5              holds across all three training seeds.
+reports how many of the 2400 test items stop at each loop
+depth under adaptive halting (œÑ =0.50, Tmin=2). The floor          Halting-Head Calibration and an Oracle-Depth Bound.
+forces every item to two loops, and the conservative threshold     The counts here are three-training-seed means; because each
+stops 97.3% there. The remaining 65 items (2.7%) continue          seed deepens a different set, they are per-seed averages rather
+to three or more loops and account for the entire accuracy         than one fixed set of items. The head deepens about 65 items
+gain over the fixed two-loop budget. Among them, 48 stop           per training seed and about 56 flip from wrong to right. Two
+after three loops, 10 after four, and 7 at depth five or beyond.   distinct rates describe the deepened items. The oracle-label
+                                                                   precision is about 85%: roughly 55 of the 65 are oracle-
+                Fixed T =2                                       {0.001, 0.01, 0.1} each, training only the halting head, and
+                                                                 both stay collapsed at a mean depth of 1.0 loops across all
+Adaptive  Correct           Wrong  Total                         six settings. We read this collapse as a property of attaching
+                                                                 penalty-based halting post hoc to a frozen looped backbone,
+Correct   1310               56    1366                          where the head is fitted after the representation it reads is
+Wrong       3               1031   1034                          fixed and cannot shape the network so that deeper loops pay
+                                                                 off, rather than as a refutation of ACT or PonderNet in the
+Total     1313              1087   2400                          end-to-end settings they were designed for.
+
+Table S6: Paired transition table of per-item correctness un-    LoopUS-Conf and TaH-Mismatch baselines. Two addi-
+der adaptive halting (œÑ =0.50, Tmin=2) versus fixed T =2         tional baselines use the same halting head but replace our
+(three-training-seed means, rounded). The 56 wrong-to-right      oracle signal. LoopUS-Conf follows the LoopUS confidence
+flips and 3 right-to-wrong flips yield a net +53. Exact Mc-      recipe (Park et al. 2026): the head is trained with a binary
+Nemar p < 0.001 on every training seed.                          cross-entropy confidence loss plus a monotonicity regular-
+                                                                 izer that encourages the continue probability to decrease with
+positive, their loss falling by more than the margin Œ¥. The      depth, without any oracle labels. The confidence threshold is
+answer-flip rate is about 86%: roughly 56 of the 65 turn a       selected on held-out data as for RecurTrace. TaH-Mismatch
+wrong greedy answer right. Both rates are best read against      adapts the oracle signal of Think-at-Hard (Fu et al. 2026b)
+their population base rates. At depth two about 153 of the       to the sequence level: the ‚Äúcontinue‚Äù label at depth t is
+2400 items (6.4%) are oracle-positive, so the 85% precision      yt = ‚äÆ[aÀÜt =Ã∏ a], where aÀÜt is the greedy answer decoded at
+on the selected tail is roughly thirteen times the population    depth t and a is the reference answer, and the head is trained
+rate, at a recall of about 36% (55 of 153). The flip rate has a  with binary cross-entropy against this token-mismatch tar-
+tighter reference. Of the 1087 items that fixed T =2 answers     get. Both baselines use the same head capacity, optimizer,
+wrongly, only 151 (13.9%) are answered correctly at any          and threshold-selection protocol as RecurTrace, isolating the
+depth in 1‚Äì16, a count implied by the correctness ceiling        effect of the supervision signal.
+below (61.0% is 1464 of 2400, against 1313 at fixed T =2).
+Deepening a randomly chosen subset of the wrong items             F Benchmark Breakdown and Diagnostics
+therefore flips at most 13.9% of them, so the head‚Äôs 86%
+is at least six times what blind deepening reaches, and it       Table S7 lists the benchmark groups and diagnostic groups
+recovers 56 of the 151 recoverable items while touching only     with item counts evaluated after bucket-stratified subsam-
+65. This is consistent with the per-depth AUROC of 0.74 in       pling. The train-covered suite holds the fourteen tasks whose
+Table S4, which summarizes ranking quality averaged over         training splits enter the mixture, and the classic suite holds
+the whole distribution and places no bound on precision in       eight standard multiple-choice benchmarks. The held-out
+the extreme tail that a threshold firing on 2.7% of items        group, including the BIG-Bench Hard subsets, is diagnostic
+reads. The two rates need not coincide, since a supra-Œ¥ loss     evidence only, not used for the main breadth claim. We eval-
+drop and a changed argmax are distinct criteria, but at this     uate with bucket-stratified sampling, reporting generation
+operating point both signals concentrate in the same tail. As    accuracy and teacher-forced NLL at loops in {1, 2, 4, 6, 8}.
+an accuracy upper bound, a correctness oracle that assigns
+each item the depth at which its greedy answer is correct (if       Table S8 reports per-suite changes against the same-budget
+any depth yields a correct answer) reaches 61.0%. This is        baseline at the two scales with full per-suite generation, 0.6B
+a different criterion from the loss oracle of Eq. (6), which     and 1.7B. At 1.7B the suite-level numbers match the breadth
+marks whether a deeper loop lowers the teacher-forced loss       table in the body. Negative log-likelihood falls and accuracy
+rather than whether it flips the greedy answer. RecurTrace       rises on train-covered tasks and on the classic suite (+1.9
+sits at 54.7 < 56.9 < 61.0, above the best fixed depth and       points). At 0.6B the likelihood gains are the largest across
+below this correctness ceiling.                                  scales because the weaker base has more headroom, with
+                                                                 both suites showing meaningful NLL reductions. The overall
+   The same head architecture supports all four trained-         same-budget accuracy gains at 4B (+2.2 points) and 8B
+halting baselines. With the ACT objective (Graves 2016)          (+3.4 points) appear in Table S12. The held-out and BIG-
+the head forms a halting distribution and pays an expected-      Bench Hard rows remain diagnostic and are not read as a
+depth ponder cost of 0.01. With the PonderNet objective          main claim. For transparency the diagnostic scores are +0.3
+(Banino, Balaguer, and Blundell 2021) it pays a Kullback-        pp on the BIG-Bench Hard subsets (28.4% to 28.7%) and
+Leibler penalty of weight 0.01 toward a geometric prior with     +0.4 pp on the remaining held-out tasks (34.8% to 35.2%)
+parameter 0.2. Both objectives use the absolute distance to      at 1.7B, weaker than the train-covered and classic results,
+the oracle target depth as a per-depth surrogate quality cost,   consistent with treating them as out-of-scope diagnostics,
+so they see the same labels as the oracle distillation. On the   not headline evidence.
+looped backbone both collapse to a single loop, as Table 2
+reports, because the per-example loss is already low after one            G Difficulty-Adaptation Details
+loop and the compute penalty dominates the small fraction
+of inputs that improve with depth. To rule out that this col-    We split each seed‚Äôs MathQA test items by correctness at a
+lapse is an artifact of a single untuned penalty, we also swept  single loop. Easy items are already solved at loop depth one,
+the ACT ponder cost and the PonderNet KL weight over             and hard items, including items the model never answers
+                                                                 correctly, need a deeper unroll (the easy/hard split is at loop
+Suite                   # Benchmarks                                                                                     Eval items
+
+Train-covered           14 arithmetic, p-hop, symbolic, AQUA-RAT, bAbI, CLUTRR, GSM8K, HotpotQA,                         45,722
+                               MATH, MathQA, MuSiQue, ProofWriter, StrategyQA, 2WikiMultiHopQA
+
+Diagnostic held-out 8 BBH date understanding, BBH logical deduction (three and five objects), BBH multistep              2,730
+                                   arithmetic, BBH tracking shuffled objects, LAMBADA (Paperno et al. 2016), MultiArith
+                                   (Roy and Roth 2015), SVAMP (Patel, Bhattamishra, and Goyal 2021)
+
+Classic                 8 ARC-Easy, ARC-Challenge, OpenBookQA (Mihaylov et al. 2018), BoolQ (Clark et al.                4,785
+                              2019), PIQA (Bisk et al. 2020), HellaSwag, WinoGrande (Sakaguchi et al. 2020), MMLU
+
+Table S7: Benchmarks and diagnostics; ‚ÄúEval items‚Äù are the subsampled counts actually evaluated, not full test-set sizes. The
+BIG-Bench Hard held-out group is retained only as a diagnostic and is excluded from the main breadth claim reported in the
+body.
+
+Scale    Suite          NLL ‚àÜ ‚Üì       Acc ‚àÜ (pp) ‚Üë               Setting        œÑ Tmin Loops Acc Gap
+
+0.6B     Train-covered    ‚àí0.11            +0.3                  Main (Tab. 2)  0.50 2          2.04 56.9 +0.06
+0.6B     Classic          ‚àí0.22            +1.1                                                 2.80 53.6 +0.59
+                                                                 Difficulty (Fig. 3) 0.10 none
+1.7B     Train-covered    ‚àí0.05            +0.8
+1.7B     Classic          ‚àí0.13            +1.9                  Table S9: Operating-point reconciliation. Both rows use the
+                                                                 same model; the main row is the three-training-seed mean
+Table S8: Per-suite generation results at 0.6B and 1.7B          (Table 2) and the difficulty row the median training seed
+against a same-budget baseline (three-training-seed means        (Table S11). The main point (œÑ =0.50, Tmin=2) is the oper-
+at both scales). Both NLL ‚àÜ (teacher-forced negative log-        ating point selected on held-out NLL, and the difficulty point
+likelihood minus the no-loop baseline) and Acc ‚àÜ (genera-        (œÑ =0.10, no floor) maximizes the held-out gain and exposes
+tion accuracy, pp) are measured at a fixed two-loop depth,       the hard-minus-easy (H‚àíE) gap more clearly. The difficulty
+matching Table S12. The overall 4B and 8B same-budget            point spends more compute (2.80 loops) yet reaches only
+gains appear in Table S12.                                       53.6% (1287 of 2400), below the best fixed depth, because
+                                                                 without a floor it both stops some items too early and over-
+depth one, where easy items are those answered correctly at      computes others, lowering accuracy despite the higher mean
+T =1 and hard items are those answered incorrectly). This        depth. It is an illustration of the adaptation pattern, not a
+split is independent of the fixed two-loop baseline used for     competing accuracy number.
+the paired transition counts, so the ‚àº50 hard items among the
+‚àº65 deepened and the 56 wrong-to-right flips against fixed       this threshold. The halting head spends more loops on hard
+two loops are counted against different references and do not    items than easy items on every one of the eight seeds, the
+conflict. The body uses two operating points from the same       gap averages 0.59 loops, and the smallest per-seed gap is still
+model and seeds, distinguished by the stopping threshold and     positive.
+the floor. Table S9 reconciles them.
+                                                                    Table S11 sweeps the shared threshold without the Tmin=2
+Main operating point (œÑ =0.50, Tmin=2). At the main op-          floor and shows the trade it controls, which Figure S1 plots
+erating point, the conservative threshold stops 97.3% of items   as a compute-accuracy curve. A lower threshold keeps the
+at the two-loop floor (Table S5). The hard-minus-easy loop       halting head looping, which raises the mean depth, lowers the
+gap is +0.06 loops, smaller than at œÑ =0.10 but positive on all  loop-count reduction, and widens the hard-easy gap. A higher
+eight seeds (+0.02 to +0.11). Of the ‚àº65 items per training      threshold stops sooner. Across the safe range every threshold
+seed that receive more than two loops, ‚àº50 (77%) are hard        keeps a nonnegative held-out gain on all eight seeds, and
+by the loop-depth-one split, so the halting head routes com-     œÑ =0.10 is the value that maximizes the summed gain while
+pute to items that need it. The paired transition breakdown      keeping the hard-easy gap positive on every seed. At œÑ =0.50
+(Table S6) shows 56 of these items flip from wrong to right      without a floor the mean depth drops to 1.06 because the
+and only 3 from right to wrong, yielding the +53 net correct-    head is confident enough to stop most items after a single
+answer gain. At this threshold the continue-probability distri-  loop. Adding the Tmin=2 floor as in the main operating
+butions for oracle-positive and oracle-negative items remain     point forces every item to at least two loops and raises the
+separated on held-out data (Appendix E), so a small mean         mean to 2.04, producing the accuracy reported in Table 2.
+depth gap can still select a high-precision tail.
+                                                                     H Additional Ablations and Discussion
+Difficulty operating point (œÑ =0.10). The difficulty figure
+reads the halting head at the deeper threshold (œÑ =0.10, mean    Memory Against Plain Looping. The consolidated abla-
+2.80 loops) that maximizes the held-out gain. Table S10          tion in Table 5 isolates Loop Memory Attention by remov-
+gives the per-seed mean depth on easy and hard items at          ing it and looping the block as plain re-iteration. On the
+                                                                 train-covered suite the teacher-forced NLL change against
+Seed        Easy loops  Hard loops   Gap                                                             Accuracy peaks at an intermediate compute budget
+
+1               2.00        2.01    +0.01                                            55
+2               2.77        4.12    +1.35
+3               3.16        4.31    +1.15                                            54
+4               1.97        2.12    +0.15
+5               2.02        2.54    +0.51                       MathQA accuracy (%)                    œÑ = 0.20         œÑ = 0.05
+6               2.42        3.02    +0.59
+7               2.04        2.26    +0.22                                            53
+8               3.65        4.40    +0.75
+                                                                                     52
+Mean            2.50        3.10    +0.59
+                                                                                                                                                œÑ = 0.01
+
+                                                                                     51  œÑ = 0.30
+
+                                                                                     50             stops too early
+
+                                                                                          œÑ = 0.50                      extra loops wasted
+                                                                                     49
+Table S10: Mean loop depth on easy and hard MathQA                                                  2                4                          8
+items per evaluation seed at the difficulty operating point                                 1
+(œÑ =0.10), shown for the median training seed. Hard items
+receive more loops than easy ones on all eight evaluation                                           Test-time compute (mean loops per example)
+seeds, and the mean gap is +0.59 loops. Gaps are computed
+from unrounded values. The pattern holds across all three       Figure S1: Sweeping the shared stopping threshold œÑ without
+training seeds.                                                 the Tmin floor traces a compute-accuracy curve on MathQA.
+                                                                As œÑ falls the halting head keeps looping, so the mean loop
+œÑ Mean loop Loop cut (%) Hard‚àíeasy ‚àÜ correct                    count grows, and accuracy rises to an optimum near œÑ =0.10
+                                                                (2.80 loops, 53.6%), then declines as extra loops are wasted.
+0.01  9.24  42.3        +1.82       +85                         The six points are the thresholds in Table S11, accuracy
+                                                                recovered from the ‚àÜ correct column over the 2400 MathQA
+0.05  4.13  74.2        +1.13       +135                        items.
+
+0.10  2.80  82.5        +0.59       +146
+
+0.20  1.90  88.1        +0.29       +139
+
+0.30  1.39  91.3        +0.18       +100                        tion trained without auxiliary losses, and the other continues
+                                                                plain looping for the same number of steps. The memory con-
+0.50  1.06  93.4        +0.03       +56                         tinuation reaches lower teacher-forced NLL than the matched
+                                                                plain continuation on both seeds, by 0.040 and 0.028 nats at
+Table S11: Shared-threshold sweep on MathQA (eight evalu-       the best loop and by 0.016 and 0.050 nats at four loops. Be-
+ation seeds, median training seed). Loop cut is the mean loop-  cause the comparison shares the same starting checkpoint
+count reduction relative to a sixteen-loop budget (1‚àíT¬Ø/16),    and the same extra budget, it isolates the memory from the
+not total compute. Hard‚àíeasy is the mean hard-minus-easy        additional training steps. We report it as a controlled single-
+loop gap, and ‚àÜ correct is the summed gain in correct answers   configuration result rather than a broad necessity claim.
+over that budget. The selected operating point (œÑ =0.10) is in
+bold.                                                           Task Type Decides Plain Against Memory. A controlled
+                                                                study on the synthetic extrapolation buckets shows the picture
+the same-budget baseline at the best-likelihood loop is ‚àí0.06   is not one-sided. On pure pointer-chasing chains, where the
+nats at 0.6B and +0.07 nats at 1.7B for plain looping, against  task is a clean fixed-point iteration, plain looping extrapolates
+‚àí0.15 and ‚àí0.03 nats once the memory is added. At 4B and        a little better than the memory variant at deep unrolls, which
+8B the pattern strengthens: plain looping drifts to +0.05 and   trails only slightly rather than collapsing. On the stateful
++0.06 nats while memory yields ‚àí0.03 and ‚àí0.02 nats.            tasks that must carry intermediate values, the symbolic and
+Plain looping on a stronger base drifts the representation      arithmetic chains, the memory variant is the stronger of the
+without adding information, and memory turns the extra          two. This is the behavior the token-wise gate is designed
+passes into an NLL reduction. The held-out and classic suites   to reconcile. It can close the memory on stateless patterns
+move the same direction at both scales, so the effect is not    and open it on stateful ones, which is why a single setting
+specific to training tasks. The generation-accuracy counter-    holds across the breadth suites without per-task tuning. The
+part at 1.7B, where Loop Memory Attention improves over         per-bucket accuracies behind this split appear in the bottom
+the memoryless Encode-Think-Decode-style baseline by 2.3        block of Table 5 in the main text.
+points on MathQA and 2.4 on the classic suite, is in the
+same table. These ablation runs are trained separately from     Parameter-Matched Non-Loop Control. A looped
+the breadth models, so their full-model NLL changes on          model adds about 2.2 percent trainable parameters over the
+the train-covered suite differ from the breadth measurements    frozen base, so one alternative explanation for its gains is the
+(Tables 4 and S8) by 0.02 nats at 1.7B and 0.04 nats at 0.6B.   extra capacity rather than the recurrence. To separate the two
+                                                                at 1.7B we train a non-looped control that adds the same bud-
+Matched Same-Start Memory Control at 8B. To test                get of trainable parameters, a low-rank adapter of matched
+loop memory at the 8B scale under a fixed budget, we start      size on the same block, but applies it only once with no
+from a trained plain-looping checkpoint and continue train-     looping, and we compare it against RecurTrace under identi-
+ing in two matched ways. One adds the loop-memory mod-          cal data, steps, and evaluation. The matched-capacity control
+ules, a single-window memory with the gate and input injec-     reaches 45.4% generation accuracy against the 44.8% same-
+Scale  Baseline Acc  Loop Acc  Acc ‚àÜ ‚Üë  NLL ‚àÜ ‚Üì                  Suite                     Baseline  RecurTrace  ‚àÜ (pp) ‚Üë
+
+0.6B        35.2        35.8     +0.6     ‚àí0.15                  Train-covered (14 tasks)    62.3        66.9      +4.6
+1.7B        44.8        46.0     +1.2     ‚àí0.08                  Classic (8 tasks)           74.0        75.4      +1.4
+4B          58.6        60.8     +2.2     ‚àí0.02
+8B          66.6        70.0     +3.4     ‚àí0.01                  Overall (22 tasks)          66.6        70.0      +3.4
+
+Table S12: Overall 22-task (unweighted task mean) genera-        Table S13: 8B per-suite generation accuracy (%) over three
+tion accuracy (%) and teacher-forced NLL change (nats) over      seeds. The baseline is a same-budget fine-tuned Qwen3-8B.
+the same-budget fine-tuned baseline at each scale, at a fixed    Overall is the unweighted mean over all 22 tasks, i.e., the
+two-loop depth, shown to one decimal. Every row averages 3       task-count-weighted mean of the two suite rows. Per-seed
+training seeds (std 0.22, 0.29, 0.33, 0.37 pp from 0.6B to 8B).  overall gains are +3.02, +3.69, +3.61 (mean 3.4, std 0.37
+Per-suite and per-task breakdowns appear in Tables S8, S13,      pp). Teacher-forced NLL drops by 0.01 nats.
+and S14.
+
+budget baseline, so it captures about half of RecurTrace‚Äôs       baseline fine-tunes all attention and feed-forward parame-
++1.2-point gain, and adding recurrence and memory sup-           ters of Qwen3-8B-Base on the same reasoning mixture for
+plies the other half to reach 46.0%. The likelihood picture is   800 optimizer steps using eight H800 GPUs, bfloat16 pre-
+more one-sided, since the capacity control lowers the overall    cision, a global batch of 128, a peak learning rate of 1e‚àí5
+22-task teacher-forced NLL by only 0.01 nats against that        with a cosine schedule, and a maximum length of 1024 to-
+baseline while RecurTrace lowers it by 0.08. Repeated depth      kens. RecurTrace freezes the base and trains only the loop,
+with memory, not added capacity alone, carries the effect.       memory, and injection modules (‚âà0.12B, at most 2%) for
+                                                                 the same 800 steps with the same optimizer and schedule
+Per-Scale Summary. Table S12 collects the same-budget            (Stage 1); the halting head is distilled separately afterwards
+generation-accuracy and teacher-forced NLL changes across        (Stage 2, Appendix E). Both runs therefore consume about
+scales. Accuracy gains grow with scale, from +0.6 to +3.4        105M training tokens (800 steps √ó 128 sequences √ó 1024
+points, while the teacher-forced NLL reduction shrinks over      tokens), each on the same hardware and precision, with the
+the same range, from 0.15 to 0.01 nats. We read the two          training budget accounted for in Table S1: because the base-
+trends as consistent rather than conflicting, because the met-   line updates all ‚âà8.2B parameters while RecurTrace updates
+rics average over different populations. Teacher-forced NLL      only the added modules, any budget mismatch favors the
+is a mean over every answer token, and most of those tokens      baseline, so the gain is not an artifact of extra training com-
+a strong base already predicts confidently, so the headroom      pute. The comparison replaces an earlier one against the
+a ‚âà2% module can move shrinks toward zero as the base            untuned Qwen3-8B-Base, which overstated the gap by also
+improves and the mean barely shifts. Generation accuracy         measuring the distance from an untrained checkpoint to any
+records only whether the argmax changes, so it is decided        supervised model. RecurTrace at 8B is evaluated at a fixed
+by the minority of items whose top two candidates sit close      two-loop depth; the halting head is not invoked in this scaling
+together, where a logit change too small to register in the      comparison, so the reported gain reflects the loop-memory
+mean NLL is enough to flip the answer. At 0.6B the base is       mechanism. Teacher-forced NLL drops by 0.01 nats at 8B, a
+weak, so likelihood has broad headroom while many of the         small but consistent improvement.
+items it improves remain far from correct; at 8B the balance
+reverses. The paragraphs below expand on the 4B and 8B              Table S14 gives the per-task breakdown for selected bench-
+rows.                                                            marks at 8B. Among the displayed train-covered tasks, gains
+                                                                 range from +3.4 to +5.3 pp, and across all 14 train-covered
+The 4B Comparison. At 4B, RecurTrace improves gen-               tasks they range from +1.7 to +6.1 pp, while classic com-
+eration accuracy by 2.2 points over a fine-tuned baseline        monsense benchmarks are more mixed (‚àí0.6 to +3.1 pp),
+trained under the same budget, and it lowers teacher-forced      and two of them (BoolQ, WinoGrande) show small negative
+NLL by about 0.02 nats. The gain is consistent with the          changes within seed noise. This pattern is consistent with a
+smaller scales and is measured against the same-budget base-     mechanism that adds latent reasoning depth rather than gen-
+line rather than a per-task loop oracle. The 300-step module     eral capacity. Per-task three-seed standard deviations range
+follow-up is shorter than the 0.6B and 1.7B schedules, so        from 0.4 to 1.9 pp, and the overall per-seed standard deviation
+we treat this row as an initial scale check rather than a fully  is 0.37 pp.
+matched training-length replication. The halting head is dis-
+tilled at 4B as at the other scales (Stage 2, Table S1); we      Reproducibility. The looped model lives in the local
+report this scaling row at a fixed two-loop depth and leave a    Qwen3 modeling code and loads on top of standard Qwen3
+full adaptive-halting evaluation at 4B to future work.           checkpoints, so the base weights load unchanged and only
+                                                                 the loop parameters initialize fresh. All training uses eight
+The 8B Comparison. At 8B, RecurTrace improves gener-             H800 GPUs. The evaluation sweeps loops in {1, 2, 4, 6, 8}
+ation accuracy by 3.4 points over a same-budget fine-tuned       with bucket-stratified sampling and reports both generation
+Qwen3-8B baseline. Table S13 reports the full per-suite          accuracy and teacher-forced negative log-likelihood. The
+breakdown with absolute accuracies across three seeds. The       MathQA adaptive comparison aggregates eight seeds of three
+                                                                 hundred items each, for 2400 test items, and selects every
+             Train-covered tasks                                              Classic tasks
+                                                                                Base
+Task         Base  Loop           ‚àÜ‚Üë                           Task                          Loop  ‚àÜ‚Üë
+                                                                                82.3
+GSM8K        44.8  50.1           +5.3                         ARC-Easy         69.5         84.0  +1.7
+MATH                              +4.8                         ARC-Challenge    70.1         72.6  +3.1
+MathQA       31.6  36.4           +5.1                         OpenBookQA       79.8         71.9  +1.8
+AQUA-RAT                          +4.1                         BoolQ            81.6         79.4  ‚àí0.4
+HotpotQA     67.5  72.6           +5.2                         PIQA             74.8         82.1  +0.5
+bAbI                              +3.4                         HellaSwag        71.6         76.9  +2.1
+ProofWriter  51.8  55.9           +4.3                         WinoGrande       62.4         71.0  ‚àí0.6
+                                                               MMLU                          65.4  +3.0
+             54.6  59.8
+
+             89.2  92.6
+
+             79.4  83.7
+
+Table S14: Per-task generation accuracy (%) at 8B, three-seed mean. Base is the same-budget fine-tuned Qwen3-8B baseline,
+and Loop is RecurTrace. Multi-step reasoning tasks gain the most, while two classic benchmarks show small negative changes
+within seed noise. The remaining seven train-covered tasks (arithmetic, p-hop, symbolic, CLUTRR, MuSiQue, StrategyQA,
+2WikiMultiHopQA) range from +1.7 to +6.1 pp. Per-task three-seed standard deviations range from 0.4 to 1.9 pp.
+
+threshold on held-out data. The block-selection probe, the
+synthetic data generators, and the evaluation scripts are de-
+terministic given their seeds and configurations.
+
